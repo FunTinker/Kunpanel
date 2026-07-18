@@ -32,28 +32,39 @@ import (
 
 const (
 	addr              = "127.0.0.1:8088"
-	panelVersion      = "0.4.0"
+	panelVersion      = "0.5.0"
 	sessionMaxAge     = 12 * time.Hour
 	maintenanceMaxAge = 10 * time.Minute
 )
 
 type config struct {
-	Admin                     string  `json:"admin"`
-	PasswordSalt              string  `json:"passwordSalt"`
-	PasswordHash              string  `json:"passwordHash"`
-	SessionKey                string  `json:"sessionKey"`
-	PanelName                 string  `json:"panelName,omitempty"`
-	NotifyURL                 string  `json:"notifyURL,omitempty"`
-	UpgradeURL                string  `json:"upgradeURL,omitempty"`
-	UpgradeKey                string  `json:"upgradeKey,omitempty"`
-	CloudflareEmail           string  `json:"cloudflareEmail,omitempty"`
-	CloudflareAPIKey          string  `json:"cloudflareAPIKey,omitempty"`
-	CloudflareAPIToken        string  `json:"cloudflareAPIToken,omitempty"`
-	CloudflareZoneID          string  `json:"cloudflareZoneID,omitempty"`
-	CloudflareAutoOrangeCloud bool    `json:"cloudflareAutoOrangeCloud,omitempty"`
-	CloudflareTrafficGB       float64 `json:"cloudflareTrafficGB,omitempty"`
-	CloudflareCPUPercent      float64 `json:"cloudflareCPUPercent,omitempty"`
-	CloudflareSustainMinutes  int     `json:"cloudflareSustainMinutes,omitempty"`
+	Admin                     string                `json:"admin"`
+	PasswordSalt              string                `json:"passwordSalt"`
+	PasswordHash              string                `json:"passwordHash"`
+	SessionKey                string                `json:"sessionKey"`
+	PanelName                 string                `json:"panelName,omitempty"`
+	NotifyURL                 string                `json:"notifyURL,omitempty"`
+	UpgradeURL                string                `json:"upgradeURL,omitempty"`
+	UpgradeKey                string                `json:"upgradeKey,omitempty"`
+	CloudflareEmail           string                `json:"cloudflareEmail,omitempty"`
+	CloudflareAPIKey          string                `json:"cloudflareAPIKey,omitempty"`
+	CloudflareAPIToken        string                `json:"cloudflareAPIToken,omitempty"`
+	CloudflareZoneID          string                `json:"cloudflareZoneID,omitempty"`
+	CloudflareAutoOrangeCloud bool                  `json:"cloudflareAutoOrangeCloud,omitempty"`
+	CloudflareTrafficGB       float64               `json:"cloudflareTrafficGB,omitempty"`
+	CloudflareCPUPercent      float64               `json:"cloudflareCPUPercent,omitempty"`
+	CloudflareSustainMinutes  int                   `json:"cloudflareSustainMinutes,omitempty"`
+	RemoteBackupRemote        string                `json:"remoteBackupRemote,omitempty"`
+	RemoteBackupPath          string                `json:"remoteBackupPath,omitempty"`
+	RemoteBackupEnabled       bool                  `json:"remoteBackupEnabled,omitempty"`
+	Users                     map[string]userRecord `json:"users,omitempty"`
+}
+
+type userRecord struct {
+	PasswordSalt string    `json:"passwordSalt"`
+	PasswordHash string    `json:"passwordHash"`
+	Role         string    `json:"role"`
+	Created      time.Time `json:"created"`
 }
 
 type sample struct {
@@ -161,6 +172,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("/api/apps", a.auth(a.handleApps))
 	mux.HandleFunc("/api/apps/detail", a.auth(a.handleAppDetail))
 	mux.HandleFunc("/api/apps/action", a.auth(a.handleAppAction))
+	mux.HandleFunc("/api/apps/registry", a.auth(a.handleAppRegistry))
 	mux.HandleFunc("/api/jobs", a.auth(a.handleJobs))
 	mux.HandleFunc("/api/sites", a.auth(a.handleSites))
 	mux.HandleFunc("/api/sites/detail", a.auth(a.handleSiteDetail))
@@ -182,11 +194,13 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("/api/security/action", a.auth(a.handleSecurityAction))
 	mux.HandleFunc("/api/audit", a.auth(a.handleAudit))
 	mux.HandleFunc("/api/settings", a.auth(a.handleSettings))
+	mux.HandleFunc("/api/users", a.auth(a.handleUsers))
 	mux.HandleFunc("/api/advanced/datastores", a.auth(a.handleDatastores))
 	mux.HandleFunc("/api/advanced/certificates", a.auth(a.handleCertificates))
 	mux.HandleFunc("/api/advanced/wordpress", a.auth(a.handleWordPress))
 	mux.HandleFunc("/api/advanced/schedules", a.auth(a.handleSchedules))
 	mux.HandleFunc("/api/advanced/backups", a.auth(a.handleBackups))
+	mux.HandleFunc("/api/advanced/remote-backups", a.auth(a.handleRemoteBackups))
 	mux.HandleFunc("/api/advanced/notifications", a.auth(a.handleNotifications))
 	mux.HandleFunc("/api/advanced/upgrade", a.auth(a.handleUpgrade))
 	mux.HandleFunc("/api/advanced/cloudflare", a.auth(a.handleCloudflare))
@@ -196,6 +210,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("/api/system/logs", a.auth(a.handleSystemLogs))
 	mux.HandleFunc("/api/system/action", a.auth(a.handleSystemAction))
 	mux.HandleFunc("/api/docker", a.auth(a.handleDocker))
+	mux.HandleFunc("/api/deployments", a.auth(a.handleDeployments))
 	mux.HandleFunc("/", serveSPA)
 	return securityHeaders(a.csrf(mux))
 }
@@ -211,8 +226,16 @@ func (a *app) loadConfig() error {
 	if err := json.Unmarshal(b, &a.cfg); err != nil {
 		return err
 	}
+	changed := false
+	if a.cfg.Users == nil && a.cfg.Admin != "" {
+		a.cfg.Users = map[string]userRecord{a.cfg.Admin: {PasswordSalt: a.cfg.PasswordSalt, PasswordHash: a.cfg.PasswordHash, Role: "admin", Created: time.Now()}}
+		changed = true
+	}
 	if a.cfg.PanelName == "" || a.cfg.PanelName == "TryAllFun Panel" {
 		a.cfg.PanelName = "鲲面板 KunPanel"
+		changed = true
+	}
+	if changed {
 		return a.saveConfig()
 	}
 	return nil
@@ -264,6 +287,7 @@ func (a *app) handleSetup(w http.ResponseWriter, r *http.Request) {
 		PasswordHash: hashPassword(in.Password, salt),
 		SessionKey:   base64.RawStdEncoding.EncodeToString(randomBytes(32)),
 		PanelName:    "TryAllFun Panel",
+		Users:        map[string]userRecord{in.Username: {PasswordSalt: base64.RawStdEncoding.EncodeToString(salt), PasswordHash: hashPassword(in.Password, salt), Role: "admin", Created: time.Now()}},
 	}
 	a.mu.Unlock()
 	if err := a.saveConfig(); err != nil {
@@ -283,20 +307,31 @@ func (a *app) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	a.mu.RLock()
-	cfg := a.cfg
-	a.mu.RUnlock()
-	salt, _ := base64.RawStdEncoding.DecodeString(cfg.PasswordSalt)
-	expected, _ := hex.DecodeString(cfg.PasswordHash)
-	actual, _ := hex.DecodeString(hashPassword(in.Password, salt))
-	if subtle.ConstantTimeCompare([]byte(in.Username), []byte(cfg.Admin)) != 1 ||
-		subtle.ConstantTimeCompare(expected, actual) != 1 {
+	role, ok := a.authenticateUser(in.Username, in.Password)
+	if !ok {
 		time.Sleep(350 * time.Millisecond)
 		writeJSON(w, 401, map[string]string{"error": "账号或密码错误"})
 		return
 	}
 	a.setSession(w, r, in.Username)
-	writeJSON(w, 200, map[string]bool{"ok": true})
+	writeJSON(w, 200, map[string]any{"ok": true, "role": role})
+}
+
+func (a *app) authenticateUser(username, password string) (string, bool) {
+	a.mu.RLock()
+	user, ok := a.cfg.Users[username]
+	if !ok && username == a.cfg.Admin {
+		user = userRecord{PasswordSalt: a.cfg.PasswordSalt, PasswordHash: a.cfg.PasswordHash, Role: "admin"}
+		ok = true
+	}
+	a.mu.RUnlock()
+	if !ok {
+		return "", false
+	}
+	salt, _ := base64.RawStdEncoding.DecodeString(user.PasswordSalt)
+	expected, _ := hex.DecodeString(user.PasswordHash)
+	actual, _ := hex.DecodeString(hashPassword(password, salt))
+	return user.Role, subtle.ConstantTimeCompare(expected, actual) == 1
 }
 
 func (a *app) handleLogout(w http.ResponseWriter, _ *http.Request) {
@@ -353,17 +388,16 @@ func (a *app) handleMaintenanceUnlock(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	if !a.validPassword(in.Password) {
+	username := a.sessionUser(r)
+	role, authenticated := a.authenticateUser(username, in.Password)
+	if !authenticated || !oneOf(role, "admin", "operator") {
 		time.Sleep(350 * time.Millisecond)
 		a.audit(r, "maintenance.unlock", "panel", false, "password rejected")
 		writeJSON(w, 403, map[string]string{"error": "maintenance password rejected"})
 		return
 	}
 	expires := time.Now().Add(maintenanceMaxAge).Unix()
-	a.mu.RLock()
-	admin := a.cfg.Admin
-	a.mu.RUnlock()
-	payload := fmt.Sprintf("%s|%d", admin, expires)
+	payload := fmt.Sprintf("%s|%d", username, expires)
 	sig := a.sign("maintenance|" + payload)
 	http.SetCookie(w, &http.Cookie{
 		Name: "taf_maintenance", Value: base64.RawURLEncoding.EncodeToString([]byte(payload + "|" + sig)),
@@ -399,10 +433,8 @@ func (a *app) validMaintenance(r *http.Request) bool {
 	if err != nil || time.Now().Unix() > exp {
 		return false
 	}
-	a.mu.RLock()
-	admin := a.cfg.Admin
-	a.mu.RUnlock()
-	return parts[0] == admin && hmac.Equal([]byte(parts[2]), []byte(a.sign("maintenance|"+parts[0]+"|"+parts[1])))
+	role := a.userRole(parts[0])
+	return parts[0] == a.sessionUser(r) && oneOf(role, "admin", "operator") && hmac.Equal([]byte(parts[2]), []byte(a.sign("maintenance|"+parts[0]+"|"+parts[1])))
 }
 
 func (a *app) validSession(r *http.Request) bool {
@@ -422,10 +454,56 @@ func (a *app) validSession(r *http.Request) bool {
 	if err != nil || time.Now().Unix() > exp {
 		return false
 	}
+	return a.userExists(parts[0]) && hmac.Equal([]byte(parts[2]), []byte(a.sign(parts[0]+"|"+parts[1])))
+}
+
+func (a *app) userExists(username string) bool {
 	a.mu.RLock()
-	admin := a.cfg.Admin
-	a.mu.RUnlock()
-	return parts[0] == admin && hmac.Equal([]byte(parts[2]), []byte(a.sign(parts[0]+"|"+parts[1])))
+	defer a.mu.RUnlock()
+	if username == a.cfg.Admin {
+		return true
+	}
+	_, ok := a.cfg.Users[username]
+	return ok
+}
+
+func (a *app) sessionUser(r *http.Request) string {
+	c, err := r.Cookie("taf_session")
+	if err != nil {
+		return ""
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(c.Value)
+	if err != nil {
+		return ""
+	}
+	parts := strings.Split(string(raw), "|")
+	if len(parts) != 3 || !a.validSession(r) {
+		return ""
+	}
+	return parts[0]
+}
+
+func (a *app) userRole(username string) string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if username == a.cfg.Admin {
+		return "admin"
+	}
+	if user, ok := a.cfg.Users[username]; ok {
+		return user.Role
+	}
+	return ""
+}
+
+func (a *app) requireRole(w http.ResponseWriter, r *http.Request, roles ...string) bool {
+	role := a.userRole(a.sessionUser(r))
+	for _, allowed := range roles {
+		if role == allowed {
+			return true
+		}
+	}
+	writeJSON(w, http.StatusForbidden, map[string]string{"error": "当前账号没有执行此操作的权限"})
+	return false
 }
 
 func (a *app) validPassword(password string) bool {
@@ -525,7 +603,7 @@ func (a *app) handleServices(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *app) handleApps(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, 200, appCatalog())
+	writeJSON(w, 200, a.appCatalog())
 }
 
 func readCPU() cpuTicks {

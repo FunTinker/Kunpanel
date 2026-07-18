@@ -200,7 +200,7 @@ func (a *app) handleAppDetail(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	for _, spec := range catalog() {
+	for _, spec := range a.allCatalog() {
 		if spec.ID != id {
 			continue
 		}
@@ -335,7 +335,7 @@ func (a *app) handleAppAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var selected *appSpec
-	for _, spec := range catalog() {
+	for _, spec := range a.allCatalog() {
 		if spec.ID == in.ID {
 			copy := spec
 			selected = &copy

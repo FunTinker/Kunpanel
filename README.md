@@ -1,52 +1,59 @@
-# Kunpanel / 鲲面板
+# KunPanel / 鲲面板
 
-TryAllFun 旗下，面向 Debian 12 的自由、私有 VPS 管理面板。无需手机号、实名或云端账号。
+KunPanel 是面向 Debian 12 的自由、私有 VPS 管理面板。无需手机号、实名或云端账号，管理服务和数据全部运行在自己的服务器上。
 
-## 当前 v0.4 能力
+项目完整源代码以 [Apache License 2.0](LICENSE) 开源，公开仓库为 <https://github.com/FunTinker/Kunpanel>。
 
-管理界面已覆盖总览、网站、应用、数据库、文件、防火墙、终端、安全中心和
-面板设置，并通过 `frontend` 目录可以从源码重新构建嵌入资源。
+## v0.5.0 功能
 
-- Go 单文件服务，内嵌管理前端
-- 应用商城支持分类搜索、版本/标签/官网元数据、安装、更新、卸载和后台任务输出
-- 应用覆盖 LNMP、Docker、PHP、Node.js、Python、Go、Java、MariaDB、PostgreSQL、Redis、RabbitMQ、Supervisor、HAProxy、Certbot、Fail2ban、ClamAV、Samba、Rsync、WordPress、Laravel、Drupal、phpMyAdmin 等
-- 首次初始化与 16 位强密码策略
-- HttpOnly 签名会话与安全响应头
-- CPU、内存、磁盘、网络实时采样
-- 1 小时到 30 天的分级聚合趋势数据
-- systemd 服务启停与重启、后台安装任务及任务输出
-- 静态网站与反向代理创建、Nginx 检查与失败保护
-- MariaDB 数据库和用户创建、数据库删除确认
-- 文件上传、目录浏览、在线编辑、重命名、权限和删除
-- nftables 独立规则表、规则校验、允许/拒绝规则
-- Root 命令工作台、SSH 设置、Root 密码修改、TLS 证书发现
-- JSONL 操作审计、管理员密码修改与 SSH 离线重置
-- 5 秒短期采样与 30 天分钟级持久化历史
-- tmux PTY 交互终端与断线会话恢复
-- PostgreSQL 角色、Redis 数据库和 MariaDB 管理
-- 压缩、解压、文件下载和安全回收站
-- Let's Encrypt 签发任务与 Certbot 自动续期
-- WordPress 数据库、程序、管理员与 Nginx 一键编排
-- nftables 默认拒绝策略与 SSH 防锁保护
-- Cron 计划任务、配置备份恢复和 HTTPS Webhook 通知
-- Ed25519 签名升级清单验证、SHA-256 校验与回滚二进制
-- Debian 12 systemd 与 Nginx 部署模板
+- Go 单二进制服务，内嵌可从 `frontend` 源码重新构建的管理前端
+- CPU、内存、磁盘、网络监控以及 1 小时至 30 天聚合趋势
+- Nginx 静态站、PHP、WordPress、反向代理和 Let's Encrypt 证书管理
+- MariaDB、PostgreSQL 和 Redis 管理，数据库用户及数据操作
+- 文件上传、编辑、下载、压缩、权限、安全回收站和在线终端
+- nftables 防火墙、Fail2ban、SSH 策略、进程、端口、磁盘和系统日志
+- systemd 服务控制、Cron、配置备份恢复、Webhook 通知和签名自动升级
+- Docker 容器管理以及 Docker Compose 项目的创建、启停、重启和日志
+- Git 仓库部署与安全参数校验后的拉取更新
+- 管理员、操作员、只读用户三级 RBAC 权限
+- rclone 远程备份，面板不保存对象存储或网盘凭据
+- JSON 扩展应用注册表，可发布自定义安装、更新、卸载和检测清单
+- JSONL 操作审计、敏感操作维护解锁、HttpOnly 签名会话和安全响应头
 
-## 本地运行
+## 应用商城
+
+内置应用覆盖 Nginx、Apache、Caddy、Docker、PHP、Node.js、Python、Go、Java、MariaDB、PostgreSQL、Redis、MongoDB、RabbitMQ、Supervisor、HAProxy、Certbot、Fail2ban、ClamAV、Samba、Rsync、WordPress、Laravel、Drupal、phpMyAdmin、Adminer、Gitea 等常用服务。
+
+部署中心的扩展应用清单允许社区维护额外应用，而无需修改面板核心代码。注册表写入前会校验应用 ID、命令长度和危险控制字符；自定义安装命令仍拥有服务器高权限，发布前必须人工审计来源和内容。
+
+## 本地开发
+
+需要 Go 1.22+ 和 Node.js 20+：
 
 ```bash
+cd frontend
+npm install
+npm run build
+cd ..
+go test ./...
 go run .
 ```
 
-打开 `http://127.0.0.1:8088`。
+打开 `http://127.0.0.1:8088` 完成首次初始化。
 
-## 安全架构原则
+## 生产部署
 
-除明确标注的 Web 终端外，高权限操作不接受任意 Shell 字符串，而是使用固定任务 ID、结构化参数、参数校验、二次确认、审计日志与配置备份。
+仓库提供 `deploy/tryallfun-panel.service`、Nginx 模板和构建说明。面板默认只监听 `127.0.0.1:8088`，生产环境应通过 HTTPS 反向代理访问，并限制管理入口来源。
 
-Web 终端属于明确的高风险例外：它允许管理员执行任意 root 命令，每次执行均要求确认并写入审计日志。
+远程备份需要先在服务器运行 `rclone config` 配置凭据。KunPanel 只保存 remote 名称和目标目录。
 
-## SSH 重置管理员密码
+## 安全模型
+
+除明确标注的 Web 终端和审核后的应用注册表命令外，高权限操作使用固定任务 ID、结构化参数、输入校验、二次确认、审计日志与配置备份。
+
+Web 终端允许授权用户执行任意 root 命令，属于明确的高风险功能。不要把面板直接暴露到公网；请启用 HTTPS、限制访问 IP，并使用独立强密码。
+
+SSH 离线重置管理员密码：
 
 ```bash
 sh /home/wwwroot/Kunpanel.456.life/scripts/reset-password.sh
@@ -54,29 +61,19 @@ sh /home/wwwroot/Kunpanel.456.life/scripts/reset-password.sh
 
 ## 签名升级源
 
-生成离线 Ed25519 密钥：
-
 ```bash
 go run ./cmd/sign-update keygen
+go run ./cmd/sign-update sign kunpanel-update-private.key v0.5.1 \
+  https://updates.example.com/kunpanel-v0.5.1 \
+  ./kunpanel-v0.5.1 "安全与稳定性更新" > manifest.json
 ```
 
-签署版本清单：
+只需把二进制和 `manifest.json` 放到 HTTPS 静态源，并在面板设置中填写 Manifest URL 与公钥。私钥不得上传服务器或提交到仓库。
 
-```bash
-go run ./cmd/sign-update sign kunpanel-update-private.key v0.3.1 \
-  https://updates.example.com/kunpanel-v0.3.1 \
-  ./kunpanel-v0.3.1 "安全与稳定性更新" > manifest.json
-```
+## 参与贡献
 
-只需把二进制和 `manifest.json` 放在 HTTPS 静态源，并在面板设置中填写
-Manifest URL 与公钥。私钥不得上传服务器或提交到仓库。
+提交补丁前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)、[SECURITY.md](SECURITY.md) 和 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。安全漏洞请按安全策略私下报告，不要直接公开利用细节。
 
-## 路线
+## 许可证
 
-1. 持久化时序数据库与降采样任务
-2. 白名单任务执行器、任务队列与 WebSocket 日志
-3. LNMP、Docker、数据库和官方应用安装器
-4. 网站、反向代理、Let's Encrypt 与 Cloudflare Origin CA
-5. 文件上传、编辑、压缩、权限与回收站
-6. nftables 规则事务、Fail2ban 与 SSH 策略
-7. 备份、计划任务、面板自更新与签名升级源
+Copyright 2026 TryAllFun contributors. Licensed under the Apache License, Version 2.0. 详见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。
