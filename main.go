@@ -32,6 +32,7 @@ import (
 
 const (
 	addr              = "127.0.0.1:8088"
+	panelVersion      = "0.4.0"
 	sessionMaxAge     = 12 * time.Hour
 	maintenanceMaxAge = 10 * time.Minute
 )

@@ -508,7 +508,7 @@ func (a *app) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	url, key := a.cfg.UpgradeURL, a.cfg.UpgradeKey
 	a.mu.RUnlock()
 	if r.Method == http.MethodGet {
-		writeJSON(w, 200, map[string]any{"version": "0.3.0", "configured": url != "" && key != "", "manifestURL": url})
+		writeJSON(w, 200, map[string]any{"version": panelVersion, "configured": url != "" && key != "", "manifestURL": url})
 		return
 	}
 	var in struct{ Action, ManifestURL, PublicKey string }
