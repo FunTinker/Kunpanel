@@ -64,15 +64,8 @@ func (a *app) customSpecs() []appSpec {
 }
 
 func (a *app) loadRegistry() ([]appSpec, error) {
-	b, err := os.ReadFile(a.registryPath())
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
+	file, err := a.readRegistryFile()
 	if err != nil {
-		return nil, err
-	}
-	var file registryFile
-	if err := json.Unmarshal(b, &file); err != nil {
 		return nil, err
 	}
 	if len(file.Apps) > 100 {
@@ -88,6 +81,32 @@ func (a *app) loadRegistry() ([]appSpec, error) {
 	return items, nil
 }
 
+func (a *app) readRegistryFile() (registryFile, error) {
+	var file registryFile
+	b, err := os.ReadFile(a.registryPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return file, nil
+	}
+	if err != nil {
+		return file, err
+	}
+	err = json.Unmarshal(b, &file)
+	return file, err
+}
+
+func (a *app) registryManifestByID(id string) (registryManifest, bool) {
+	file, err := a.readRegistryFile()
+	if err != nil {
+		return registryManifest{}, false
+	}
+	for _, manifest := range file.Apps {
+		if manifest.ID == id {
+			return manifest, true
+		}
+	}
+	return registryManifest{}, false
+}
+
 func validateManifest(manifest registryManifest) error {
 	if !safeNameRE.MatchString(manifest.ID) || strings.TrimSpace(manifest.Name) == "" || strings.TrimSpace(manifest.Version) == "" {
 		return errors.New("registry manifest has invalid id, name, or version")
@@ -98,6 +117,14 @@ func validateManifest(manifest registryManifest) error {
 	for _, command := range append(append([]string{}, manifest.Install...), append(manifest.Update, manifest.Uninstall...)...) {
 		if len(command) == 0 || len(command) > 4096 || strings.ContainsAny(command, "\x00\r\n") {
 			return errors.New("registry command contains invalid characters")
+		}
+	}
+	if len(manifest.Services) > 20 || len(manifest.Config) > 50 {
+		return errors.New("registry services or config contains too many entries")
+	}
+	for _, service := range manifest.Services {
+		if !safeNameRE.MatchString(service) {
+			return errors.New("registry service name is invalid")
 		}
 	}
 	return nil

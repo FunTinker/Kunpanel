@@ -1,6 +1,6 @@
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
-const state = { page: 'overview', range: '1h', overview: null, metrics: [], filePath: '', jobs: [] };
+const state = { page: 'overview', range: '1h', overview: null, metrics: [], filePath: '', jobs: [], role: '', user: '', twoFactor: false };
 const icons = { overview:'⌁',sites:'◫',apps:'◇',deploy:'⇧',database:'⬡',files:'▱',firewall:'⛨',system:'▦',terminal:'⌘',security:'◉',settings:'⚙' };
 const nav = [['overview','总览'],['sites','网站'],['apps','应用商城'],['deploy','部署中心'],['database','数据库'],['files','文件管理'],['firewall','防火墙'],['system','系统工具'],['terminal','终端'],['security','安全中心'],['settings','面板设置']];
 
@@ -26,7 +26,7 @@ async function api(path, options={}, retryMaintenance=true) {
     await unlockMaintenance();
     return api(path, options, false);
   }
-  if (res.status === 401) { loginView(false); throw new Error('登录已过期'); }
+  if (res.status === 401) { loginView(false, state.twoFactor); throw new Error('登录已过期'); }
   if (!res.ok) throw new Error(data.error || `请求失败 (${res.status})`);
   return data;
 }
@@ -41,7 +41,7 @@ function shell(content='') {
     <nav>${nav.map(([id,label])=>`<button data-page="${id}" class="${state.page===id?'active':''}"><i>${icons[id]}</i>${label}</button>`).join('')}</nav>
     <div class="aside-foot"><span class="pulse"></span><div><strong>系统运行正常</strong><small>Debian 12 · 在线</small></div></div>
   </aside><main><header><button class="mobile-menu">☰</button><div class="crumb">鲲面板 KunPanel <span>/</span> ${nav.find(x=>x[0]===state.page)?.[1]}</div>
-    <div class="head-actions"><button id="jobs-button" title="后台任务">⌁</button><div class="avatar">TA</div><button id="logout">退出</button></div>
+    <div class="head-actions">${state.role==='viewer'?'':'<button id="jobs-button" title="后台任务">⌁</button>'}<div class="avatar">${esc((state.user||'TA').slice(0,2).toUpperCase())}</div><button id="logout">退出</button></div>
   </header><section id="content">${content}</section></main></div><div id="modal-root"></div><div id="toast-root"></div>`;
 }
 
@@ -70,13 +70,14 @@ function modal(title, body, onSubmit, wide=false) {
   };
 }
 
-function loginView(setup=false) {
+function loginView(setup=false, twoFactor=false) {
   document.body.innerHTML=`<div class="login-page"><div class="login-card"><div class="brand login-brand"><div class="brand-mark">鲲</div><div><strong>鲲面板 KunPanel</strong><span>BY TRYALLFUN</span></div></div>
   <h1>${setup?'初始化管理面板':'欢迎回来'}</h1><p>${setup?'创建唯一管理员账号，无需手机号或实名。':'登录以管理你的 Debian 服务器'}</p>
   <form id="auth-form"><label>管理员账号<input name="username" autocomplete="username" required minlength="3" placeholder="admin"></label>
   <label>管理员密码<input name="password" type="password" autocomplete="${setup?'new-password':'current-password'}" required placeholder="${setup?'至少 16 位，含大小写、数字、符号':'输入管理员密码'}"></label>
+  ${!setup&&twoFactor?'<label>动态验证码<input name="otp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="认证器中的 6 位验证码"></label>':''}
   <div class="form-error"></div><button class="primary" type="submit">${setup?'创建并进入面板':'安全登录'}</button></form><footer>KunPanel by TryAllFun · 海纳万物，自由掌控</footer></div></div>`;
-  $('#auth-form').onsubmit=async e=>{e.preventDefault();const form=Object.fromEntries(new FormData(e.target));try{await api(setup?'/api/setup':'/api/login',{method:'POST',body:JSON.stringify(form)});boot()}catch(err){$('.form-error').textContent=err.message}};
+  $('#auth-form').onsubmit=async e=>{e.preventDefault();const form=Object.fromEntries(new FormData(e.target));try{const result=await api(setup?'/api/setup':'/api/login',{method:'POST',body:JSON.stringify(form)});state.role=result.role||'admin';await boot()}catch(err){$('.form-error').textContent=err.message}};
 }
 
 function pageHead(title, desc, action='') { return `<div class="page-head"><div><h1>${title}</h1><p>${desc}</p></div>${action}</div>`; }
@@ -88,13 +89,13 @@ async function renderOverview() {
   document.body.innerHTML=shell(`${pageHead('服务器总览','实时硬件、网络与核心服务状态。',`<div class="server-pill"><span></span>${esc(o.hostname||'—')} · ${esc(o.ip||'—')}</div>`)}
   <div class="metrics">${metricCard('CPU 使用率',(m.cpu||0).toFixed(1),'%','cyan',`${o.cpuCores||0} 核心 · 负载 ${o.load||'—'}`)}${metricCard('内存使用率',(m.memory||0).toFixed(1),'%','violet','每 5 秒采样')}${metricCard('磁盘使用率',(m.disk||0).toFixed(1),'%','green','系统盘 /')}${metricCard('实时网络',(m.network||0).toFixed(1),' KB/s','orange','上行 + 下行')}</div>
   <div class="grid-main"><article class="panel chart-panel"><div class="panel-title"><div><h2>资源趋势</h2><p>短周期保留精度，长周期自动聚合</p></div><div class="range">${['1h','6h','24h','7d','30d'].map(x=>`<button data-range="${x}" class="${state.range===x?'active':''}">${x}</button>`).join('')}</div></div><div class="legend"><span class="cpu">CPU</span><span class="memory">内存</span><span class="network">网络</span></div><div class="chart-wrap"><canvas id="chart"></canvas></div></article>
-  <article class="panel info-panel"><div class="panel-title"><div><h2>服务器信息</h2><p>当前节点详情</p></div></div>${infoRow('主机名',o.hostname||'—')}${infoRow('操作系统',o.os||'—')}${infoRow('架构',o.kernel||'—')}${infoRow('面板运行时间',o.uptime||'—')}${infoRow('面板版本','v0.5.0')}</article></div>
+  <article class="panel info-panel"><div class="panel-title"><div><h2>服务器信息</h2><p>当前节点详情</p></div></div>${infoRow('主机名',o.hostname||'—')}${infoRow('操作系统',o.os||'—')}${infoRow('架构',o.kernel||'—')}${infoRow('面板运行时间',o.uptime||'—')}${infoRow('面板版本','v0.5.1')}</article></div>
   <div class="grid-bottom"><article class="panel"><div class="panel-title"><div><h2>核心服务</h2><p>可直接启停与重启</p></div><button class="link" data-page="apps">应用商店 →</button></div><div id="services" class="services"></div></article>
   <article class="panel"><div class="panel-title"><div><h2>最近任务</h2><p>安装与系统操作</p></div><button class="link" id="view-jobs">全部任务 →</button></div><div id="recent-jobs" class="compact-list">暂无任务</div></article></div>`);
   bindShell(); drawChart();
   $$('[data-range]').forEach(b=>b.onclick=async()=>{state.range=b.dataset.range;await loadMetrics();renderOverview()});
   $('#view-jobs').onclick=jobsModal;
-  const [services,jobs]=await Promise.all([api('/api/services'),api('/api/jobs')]);
+  const [services,jobs]=await Promise.all([api('/api/services'),api('/api/jobs').catch(()=>[])]);
   $('#services').innerHTML=services.slice(0,4).map(serviceCard).join('');
   $('#recent-jobs').innerHTML=jobs.length?jobs.slice(0,4).map(j=>`<div class="compact-row"><span>${esc(j.name)}</span><b class="${j.status}">${statusText(j.status)}</b></div>`).join(''):'暂无后台任务';
   bindServiceButtons();
@@ -232,19 +233,22 @@ async function securityView(){
   <div class="settings-grid"><article class="panel setting-card"><i>⌘</i><h2>SSH 安全</h2><p>端口 ${s.sshPort} · 密码登录${ssh.passwordAuth?'已开启':'已关闭'} · Root 登录${ssh.rootLogin?'已开启':'仅密钥'}</p><button class="outline" id="ssh-settings">管理 SSH</button></article>
   <article class="panel setting-card"><i>◈</i><h2>TLS / Let's Encrypt</h2><p>已发现 ${s.tls?.length||0} 张证书，可自动签发与续期。</p><div class="button-row"><button class="outline" id="cert-list">查看证书</button><button class="outline" id="issue-cert">签发证书</button></div></article>
   <article class="panel setting-card"><i>●</i><h2>Root 密码</h2><p>通过系统 chpasswd 安全更新，不写入日志。</p><button class="outline" id="root-password">修改密码</button></article>
-  <article class="panel setting-card"><i>≡</i><h2>操作审计</h2><p>记录系统配置、文件、服务、安装及终端操作。</p><button class="outline" id="audit-log">查看日志</button></article></div>`);
-  bindShell();$('#ssh-settings').onclick=()=>sshModal(s);$('#root-password').onclick=rootPasswordModal;$('#audit-log').onclick=auditModal;
+  <article class="panel setting-card"><i>≡</i><h2>操作审计</h2><p>记录系统配置、文件、服务、安装及终端操作。</p><button class="outline" id="audit-log" ${state.role==='viewer'?'disabled':''}>查看日志</button></article>
+  <article class="panel setting-card"><i>◎</i><h2>双重认证</h2><p>${s.twoFactor?'主管理员已启用 TOTP':'尚未启用动态验证码'}</p><button class="outline" id="totp-settings" ${state.role==='admin'?'':'disabled'}>${s.twoFactor?'停用':'启用'} TOTP</button></article></div>`);
+  bindShell();$('#ssh-settings').onclick=()=>sshModal(s);$('#root-password').onclick=rootPasswordModal;$('#audit-log').onclick=auditModal;$('#totp-settings').onclick=()=>totpModal(s.twoFactor);
   $('#cert-list').onclick=()=>modal('TLS 证书',`<div class="cert-list">${(s.tls||[]).map(c=>`<article><strong>${esc(c.path)}</strong><pre>${esc(c.detail)}</pre></article>`).join('')||'未发现证书'}</div>`,null,true);
   $('#issue-cert').onclick=certificateModal;
 }
 async function certificateModal(){const c=await api('/api/advanced/certificates');if(!c.certbot){return modal('安装 Certbot',`<form><p>服务器尚未安装 Certbot，将从 Debian 官方源安装。</p><div class="form-error"></div><button class="primary" type="submit">安装 Certbot</button></form>`,async()=>{const j=await api('/api/advanced/certificates',{method:'POST',body:JSON.stringify({action:'install-certbot'})});watchJob(j.id)})}modal('签发 Let’s Encrypt 证书',`<form><label>域名<input name="domain" required></label><label>邮箱<input name="email" type="email" required></label><label>WebRoot（可留空）<input name="root"></label><div class="form-error"></div><button class="primary" type="submit">签发并启用自动续期</button></form>`,async fd=>{const j=await api('/api/advanced/certificates',{method:'POST',body:JSON.stringify({action:'issue',...Object.fromEntries(fd)})});toast('证书任务已启动');watchJob(j.id)})}
 function sshModal(s){modal('SSH 安全设置',`<form><div class="warning-box">修改端口前，请确认云厂商安全组允许新端口。配置会先通过 sshd -t 检查再重载。</div><label>SSH 端口<input name="port" type="number" min="1" max="65535" value="${s.sshPort}" required></label><label class="check"><input name="passwordAuth" type="checkbox" ${s.ssh?.passwordAuth?'checked':''}> 允许密码登录</label><label class="check"><input name="rootLogin" type="checkbox" ${s.ssh?.rootLogin?'checked':''}> 允许 Root 密码登录</label><label>输入 APPLY SSH 确认<input name="confirm" required></label><div class="form-error"></div><button class="danger" type="submit">验证并应用 SSH 配置</button></form>`,async fd=>{await api('/api/security/action',{method:'POST',body:JSON.stringify({action:'ssh',port:Number(fd.get('port')),passwordAuth:fd.has('passwordAuth'),rootLogin:fd.has('rootLogin'),confirm:fd.get('confirm')})});toast('SSH 配置已应用');securityView()})}
 function rootPasswordModal(){modal('修改 Root 密码',`<form><div class="warning-box">密码不会保存到面板配置或审计日志。</div><label>新密码<input name="rootPassword" type="password" minlength="16" required></label><label>输入 CHANGE ROOT PASSWORD 确认<input name="confirm" required></label><div class="form-error"></div><button class="danger" type="submit">修改 Root 密码</button></form>`,async fd=>{await api('/api/security/action',{method:'POST',body:JSON.stringify({action:'root-password',rootPassword:fd.get('rootPassword'),confirm:fd.get('confirm')})});toast('Root 密码已修改')})}
+async function totpModal(enabled){if(enabled)return modal('停用双重认证',`<form><div class="warning-box">停用后登录将不再要求动态验证码。</div><label>管理员密码<input name="password" type="password" required></label><div class="form-error"></div><button class="danger" type="submit">停用 TOTP</button></form>`,async fd=>{await api('/api/security/totp',{method:'POST',body:JSON.stringify({action:'disable',password:fd.get('password')})});state.twoFactor=false;toast('双重认证已停用');securityView()});const setup=await api('/api/security/totp',{method:'POST',body:JSON.stringify({action:'begin'})});modal('启用双重认证',`<form><div class="warning-box">在认证器中添加下面的密钥，然后输入生成的 6 位验证码。密钥只在本次显示。</div>${infoRow('账户密钥',setup.secret)}<label>动态验证码<input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required></label><div class="form-error"></div><button class="primary" type="submit">验证并启用</button></form>`,async fd=>{await api('/api/security/totp',{method:'POST',body:JSON.stringify({action:'enable',secret:setup.secret,code:fd.get('code')})});state.twoFactor=true;toast('双重认证已启用');securityView()})}
 async function auditModal(){const logs=await api('/api/audit');modal('操作审计',`<div class="audit-list">${logs.map(x=>`<div class="audit-row"><span>${fmtDate(x.time)}</span><strong>${esc(x.action)}</strong><span>${esc(x.target)}</span><b class="${x.success?'success':'failed'}">${x.success?'成功':'失败'}</b><small>${esc(x.ip)}</small><pre>${esc(x.detail)}</pre></div>`).join('')||'暂无审计记录'}</div>`,null,true)}
 
 async function settingsView(){
   const [s,schedules,backups,notify,upgrade,users]=await Promise.all([api('/api/settings'),api('/api/advanced/schedules'),api('/api/advanced/backups'),api('/api/advanced/notifications'),api('/api/advanced/upgrade'),api('/api/users').catch(()=>[])]);
-  document.body.innerHTML=shell(`${pageHead('面板设置','管理面板身份、管理员密码与运行信息。')}<div class="settings-layout"><article class="panel"><div class="panel-title"><div><h2>基础设置</h2><p>修改后立即生效</p></div></div><form id="settings-form"><label>面板名称<input name="panelName" value="${esc(s.panelName)}" maxlength="40"></label><hr><h3>修改管理员密码（可选）</h3><label>当前密码<input name="currentPassword" type="password"></label><label>新密码<input name="newPassword" type="password" placeholder="至少 16 位，含大小写、数字、符号"></label><div class="form-error"></div><button class="primary" type="submit">保存设置</button></form></article>
+  const adminOnly=state.role==='admin'?'':'disabled';
+  document.body.innerHTML=shell(`${pageHead('面板设置','管理面板身份、管理员密码与运行信息。')}<div class="settings-layout"><article class="panel"><div class="panel-title"><div><h2>基础设置</h2><p>仅管理员可修改</p></div></div><form id="settings-form"><label>面板名称<input name="panelName" value="${esc(s.panelName)}" maxlength="40" ${adminOnly}></label><hr><h3>修改管理员密码（可选）</h3><label>当前密码<input name="currentPassword" type="password" ${adminOnly}></label><label>新密码<input name="newPassword" type="password" placeholder="至少 16 位，含大小写、数字、符号" ${adminOnly}></label><div class="form-error"></div><button class="primary" type="submit" ${adminOnly}>保存设置</button></form></article>
   <article class="panel info-panel">${infoRow('版本',s.version)}${infoRow('管理员',s.admin)}${infoRow('监听地址',s.listen)}${infoRow('数据目录',s.dataDir)}${infoRow('文件根目录',s.fileRoot)}</article></div>
   <div class="settings-grid advanced-settings"><article class="panel setting-card"><i>◷</i><h2>定时任务</h2><p>${schedules.length} 个 Cron 任务，由 /etc/cron.d/kunpanel 管理。</p><button class="outline" id="schedules">管理任务</button></article>
   <article class="panel setting-card"><i>▣</i><h2>备份与恢复</h2><p>${backups.length} 个配置备份，包含面板、Nginx、TLS、SSH。</p><button class="outline" id="backups">管理备份</button></article>
@@ -261,7 +265,7 @@ function backupsModal(items){modal('备份与恢复',`<div class="button-row"><b
 function notificationModal(){modal('Webhook 通知',`<form><label>HTTPS Webhook URL<input name="url" type="url" placeholder="https://example.com/webhook"></label><label class="check"><input name="test" type="checkbox"> 保存后发送测试消息</label><div class="form-error"></div><button class="primary" type="submit">保存通知渠道</button></form>`,async fd=>{await api('/api/advanced/notifications',{method:'POST',body:JSON.stringify({url:fd.get('url'),action:fd.has('test')?'test':'save'})});toast('通知设置已保存');settingsView()})}
 function upgradeModal(current){modal('签名自动升级',`<form><div class="warning-box">只有通过 Ed25519 公钥验证的升级清单才会被接受。升级前自动保留 rollback 二进制。</div><label>Manifest URL<input name="manifestURL" type="url" value="${esc(current.manifestURL||'')}" required></label><label>Ed25519 公钥（Base64）<textarea name="publicKey" required></textarea></label><div class="form-error"></div><button class="primary" type="submit">保存升级源</button></form><button class="outline" id="check-upgrade">检查更新</button>`,async fd=>{await api('/api/advanced/upgrade',{method:'POST',body:JSON.stringify({action:'configure',manifestURL:fd.get('manifestURL'),publicKey:fd.get('publicKey')})});toast('升级源已保存');settingsView()});$('#check-upgrade').onclick=async()=>{try{const m=await api('/api/advanced/upgrade',{method:'POST',body:JSON.stringify({action:'check'})});toast('发现版本 '+m.version)}catch(e){toast(e.message,'error')}}}
 
-async function jobsModal(){const jobs=await api('/api/jobs');modal('后台任务',`<div class="job-list">${jobs.map(j=>`<article><div><strong>${esc(j.name)}</strong><span class="${j.status}">${statusText(j.status)}</span></div><small>${fmtDate(j.started)}</small><pre>${esc(j.output||j.error||'等待输出…')}</pre></article>`).join('')||'暂无任务'}</div>`,null,true)}
+async function jobsModal(){if(state.role==='viewer')return toast('当前账号无权查看任务日志','error');const jobs=await api('/api/jobs');modal('后台任务',`<div class="job-list">${jobs.map(j=>`<article><div><strong>${esc(j.name)}</strong><span class="${j.status}">${statusText(j.status)}</span></div><small>${fmtDate(j.started)}</small><pre>${esc(j.output||j.error||'等待输出…')}</pre></article>`).join('')||'暂无任务'}</div>`,null,true)}
 async function watchJob(id){for(let i=0;i<240;i++){await new Promise(r=>setTimeout(r,2000));const j=await api('/api/jobs?id='+encodeURIComponent(id));if(j.status!=='running'){toast(j.status==='success'?'安装完成':'安装失败',j.status==='success'?'ok':'error');jobsModal();return}}}
 async function loadMetrics(){try{state.metrics=(await api('/api/metrics?range='+state.range)).points}catch{}}
 
@@ -282,5 +286,5 @@ async function navigate(page){
   }catch(e){toast(e.message,'error')}
 }
 
-async function boot(){try{const status=await api('/api/status');if(!status.configured)return loginView(true);await navigate('overview')}catch{loginView(false)}}
+async function boot(){try{const status=await api('/api/status');state.twoFactor=!!status.twoFactor;if(!status.configured)return loginView(true);const session=await api('/api/session');state.role=session.role||'';state.user=session.username||'';await navigate('overview')}catch{loginView(false,state.twoFactor)}}
 boot();

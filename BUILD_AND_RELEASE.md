@@ -30,12 +30,10 @@ Rollback to the latest saved production binary:
 /usr/local/sbin/kunpanel-rollback
 ```
 
-Frontend rebuilds are intentionally guarded because `frontend/src` is not yet the full production UI source. The production UI currently lives in `web/dist`.
-
-Only rebuild frontend after restoring the full frontend source:
+The production UI source lives in `frontend/src` and the embedded release assets are generated into `web/dist`:
 
 ```bash
-KUNPANEL_ALLOW_FRONTEND_REBUILD=1 /usr/local/sbin/kunpanel-build --frontend
+/usr/local/sbin/kunpanel-build --frontend
 ```
 
 Production binary:

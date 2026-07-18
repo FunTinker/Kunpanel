@@ -329,7 +329,7 @@ server {
 		fmt.Sprintf("%s -t && %s -s reload", shellQuote(nginxBin()), shellQuote(nginxBin())),
 		fmt.Sprintf("chown -R www:www %s", shellQuote(filepath.Dir(root))),
 	}
-	j := a.startJob("部署 WordPress "+in.Domain, commands, r)
+	j := a.startSensitiveJob("部署 WordPress "+in.Domain, commands, []string{password, adminPassword}, r)
 	a.audit(r, "wordpress.credentials", in.Domain, true, "数据库凭据仅在本次响应返回")
 	writeJSON(w, 202, map[string]any{"job": j, "database": db, "user": user, "password": password, "adminUser": "kunadmin", "adminPassword": adminPassword, "root": root})
 }
@@ -433,9 +433,7 @@ func (a *app) handleBackups(w http.ResponseWriter, r *http.Request) {
 	case "create":
 		name := "kunpanel-" + time.Now().Format("20060102-150405") + ".tar.gz"
 		target := filepath.Join(root, name)
-		j := a.startJob("创建面板备份", []string{
-			fmt.Sprintf("tar -czf %s /var/lib/tryallfun-panel /usr/local/nginx/conf/vhost /usr/local/nginx/conf/ssl /etc/ssh/sshd_config /etc/ssh/sshd_config.d /etc/cron.d/kunpanel 2>/dev/null", shellQuote(target)),
-		}, r)
+		j := a.startJob("创建面板备份", []string{backupCommand(a.dataDir, target)}, r)
 		writeJSON(w, 202, j)
 	case "restore":
 		if !safeNameRE.MatchString(in.Name) || !strings.HasSuffix(in.Name, ".tar.gz") || in.Confirm != "RESTORE "+in.Name {
@@ -455,6 +453,12 @@ func (a *app) handleBackups(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSON(w, 400, map[string]string{"error": "不支持的备份操作"})
 	}
+}
+
+func backupCommand(dataDir, target string) string {
+	backupDir := filepath.Join(dataDir, "backups")
+	return fmt.Sprintf("tar --exclude=%s -czf %s %s /usr/local/nginx/conf/vhost /usr/local/nginx/conf/ssl /etc/ssh/sshd_config /etc/ssh/sshd_config.d /etc/cron.d/kunpanel 2>/dev/null",
+		shellQuote(backupDir), shellQuote(target), shellQuote(dataDir))
 }
 
 func (a *app) handleNotifications(w http.ResponseWriter, r *http.Request) {

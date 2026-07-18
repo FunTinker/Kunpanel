@@ -32,7 +32,7 @@ import (
 
 const (
 	addr              = "127.0.0.1:8088"
-	panelVersion      = "0.5.0"
+	panelVersion      = "0.5.1"
 	sessionMaxAge     = 12 * time.Hour
 	maintenanceMaxAge = 10 * time.Minute
 )
@@ -54,9 +54,13 @@ type config struct {
 	CloudflareTrafficGB       float64               `json:"cloudflareTrafficGB,omitempty"`
 	CloudflareCPUPercent      float64               `json:"cloudflareCPUPercent,omitempty"`
 	CloudflareSustainMinutes  int                   `json:"cloudflareSustainMinutes,omitempty"`
+	CloudflareLastSwitch      time.Time             `json:"cloudflareLastSwitch,omitempty"`
+	CloudflareLastError       string                `json:"cloudflareLastError,omitempty"`
 	RemoteBackupRemote        string                `json:"remoteBackupRemote,omitempty"`
 	RemoteBackupPath          string                `json:"remoteBackupPath,omitempty"`
 	RemoteBackupEnabled       bool                  `json:"remoteBackupEnabled,omitempty"`
+	TOTPSecret                string                `json:"totpSecret,omitempty"`
+	TOTPEnabled               bool                  `json:"totpEnabled,omitempty"`
 	Users                     map[string]userRecord `json:"users,omitempty"`
 }
 
@@ -75,18 +79,28 @@ type sample struct {
 	Network float64 `json:"network"`
 }
 
+type loginAttempt struct {
+	Failures     int
+	LastFailure  time.Time
+	BlockedUntil time.Time
+}
+
 type app struct {
-	mu                sync.RWMutex
-	cfg               config
-	cfgPath           string
-	dataDir           string
-	started           time.Time
-	samples           []sample
-	history           []sample
-	lastCPU           cpuTicks
-	lastNet           uint64
-	lastPersistMinute int64
-	jobs              map[string]*job
+	mu                   sync.RWMutex
+	cfg                  config
+	cfgPath              string
+	dataDir              string
+	started              time.Time
+	samples              []sample
+	history              []sample
+	lastCPU              cpuTicks
+	lastNet              uint64
+	lastPersistMinute    int64
+	jobs                 map[string]*job
+	loginAttempts        map[string]loginAttempt
+	cloudflareHighSince  time.Time
+	cloudflareLastAction time.Time
+	networkSinceStart    uint64
 }
 
 type cpuTicks struct{ idle, total uint64 }
@@ -104,10 +118,11 @@ func main() {
 		return
 	}
 	a := &app{
-		cfgPath: filepath.Join(dataDir, "config.json"),
-		dataDir: dataDir,
-		started: time.Now(),
-		jobs:    map[string]*job{},
+		cfgPath:       filepath.Join(dataDir, "config.json"),
+		dataDir:       dataDir,
+		started:       time.Now(),
+		jobs:          map[string]*job{},
+		loginAttempts: map[string]loginAttempt{},
 	}
 	if err := a.loadConfig(); err != nil {
 		log.Fatal(err)
@@ -147,9 +162,7 @@ func resetPasswordCLI(dataDir string) error {
 	if err := validateStrongPassword(password); err != nil {
 		return err
 	}
-	salt := randomBytes(16)
-	cfg.PasswordSalt = base64.RawStdEncoding.EncodeToString(salt)
-	cfg.PasswordHash = hashPassword(password, salt)
+	setAdminPassword(&cfg, password)
 	cfg.SessionKey = base64.RawStdEncoding.EncodeToString(randomBytes(32))
 	out, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
@@ -164,6 +177,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("/api/setup", a.handleSetup)
 	mux.HandleFunc("/api/login", a.handleLogin)
 	mux.HandleFunc("/api/logout", a.handleLogout)
+	mux.HandleFunc("/api/session", a.auth(a.handleSession))
 	mux.HandleFunc("/api/maintenance/unlock", a.auth(a.handleMaintenanceUnlock))
 	mux.HandleFunc("/api/metrics", a.auth(a.handleMetrics))
 	mux.HandleFunc("/api/overview", a.auth(a.handleOverview))
@@ -192,6 +206,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("/api/terminal", a.auth(a.handleTerminal))
 	mux.HandleFunc("/api/security", a.auth(a.handleSecurity))
 	mux.HandleFunc("/api/security/action", a.auth(a.handleSecurityAction))
+	mux.HandleFunc("/api/security/totp", a.auth(a.handleTOTP))
 	mux.HandleFunc("/api/audit", a.auth(a.handleAudit))
 	mux.HandleFunc("/api/settings", a.auth(a.handleSettings))
 	mux.HandleFunc("/api/users", a.auth(a.handleUsers))
@@ -255,9 +270,9 @@ func (a *app) saveConfig() error {
 
 func (a *app) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	a.mu.RLock()
-	configured := a.cfg.Admin != ""
+	configured, twoFactor := a.cfg.Admin != "", a.cfg.TOTPEnabled
 	a.mu.RUnlock()
-	writeJSON(w, 200, map[string]any{"configured": configured})
+	writeJSON(w, 200, map[string]any{"configured": configured, "twoFactor": twoFactor})
 }
 
 func (a *app) handleSetup(w http.ResponseWriter, r *http.Request) {
@@ -303,16 +318,27 @@ func (a *app) handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", 405)
 		return
 	}
-	var in struct{ Username, Password string }
+	var in struct{ Username, Password, OTP string }
 	if !decodeJSON(w, r, &in) {
 		return
 	}
+	key := strings.ToLower(strings.TrimSpace(in.Username)) + "|" + clientIP(r)
+	if retry := a.loginRetryAfter(key); retry > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(retry))
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "登录失败次数过多，请稍后再试"})
+		return
+	}
 	role, ok := a.authenticateUser(in.Username, in.Password)
+	if ok && a.totpRequired(in.Username) && !verifyTOTP(a.totpSecret(), in.OTP, time.Now()) {
+		ok = false
+	}
 	if !ok {
 		time.Sleep(350 * time.Millisecond)
+		a.recordLoginFailure(key)
 		writeJSON(w, 401, map[string]string{"error": "账号或密码错误"})
 		return
 	}
+	a.clearLoginFailures(key)
 	a.setSession(w, r, in.Username)
 	writeJSON(w, 200, map[string]any{"ok": true, "role": role})
 }
@@ -337,6 +363,11 @@ func (a *app) authenticateUser(username, password string) (string, bool) {
 func (a *app) handleLogout(w http.ResponseWriter, _ *http.Request) {
 	http.SetCookie(w, &http.Cookie{Name: "taf_session", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func (a *app) handleSession(w http.ResponseWriter, r *http.Request) {
+	username := a.sessionUser(r)
+	writeJSON(w, 200, map[string]any{"username": username, "role": a.userRole(username), "twoFactor": a.totpRequired(username)})
 }
 
 func (a *app) auth(next http.HandlerFunc) http.HandlerFunc {
@@ -543,9 +574,14 @@ func (a *app) collectSample() {
 	mem := memoryPercent()
 	disk := diskPercent("/")
 	cpu := percentDelta(a.lastCPU, cpuNow)
-	network := float64(netNow-a.lastNet) / 5 / 1024
+	var networkDelta uint64
+	if netNow >= a.lastNet {
+		networkDelta = netNow - a.lastNet
+	}
+	network := float64(networkDelta) / 5 / 1024
 	a.lastCPU, a.lastNet = cpuNow, netNow
 	a.mu.Lock()
+	a.networkSinceStart += networkDelta
 	current := sample{time.Now().UnixMilli(), cpu, mem, disk, network}
 	a.samples = append(a.samples, current)
 	if len(a.samples) > 17280 {
@@ -561,10 +597,12 @@ func (a *app) collectSample() {
 			a.history = a.history[1:]
 		}
 	}
+	trafficGB := float64(a.networkSinceStart) / (1024 * 1024 * 1024)
 	a.mu.Unlock()
 	if persist {
 		a.appendMetricHistory(current)
 	}
+	a.maybeAutoOrangeCloud(current.CPU, trafficGB)
 }
 
 func (a *app) handleMetrics(w http.ResponseWriter, r *http.Request) {
@@ -823,6 +861,21 @@ func hashPassword(password string, salt []byte) string {
 		sum = sha256.Sum256(h.Sum(nil))
 	}
 	return hex.EncodeToString(sum[:])
+}
+
+func setAdminPassword(cfg *config, password string) {
+	salt := randomBytes(16)
+	cfg.PasswordSalt = base64.RawStdEncoding.EncodeToString(salt)
+	cfg.PasswordHash = hashPassword(password, salt)
+	if cfg.Users == nil {
+		cfg.Users = map[string]userRecord{}
+	}
+	owner := cfg.Users[cfg.Admin]
+	owner.PasswordSalt, owner.PasswordHash, owner.Role = cfg.PasswordSalt, cfg.PasswordHash, "admin"
+	if owner.Created.IsZero() {
+		owner.Created = time.Now()
+	}
+	cfg.Users[cfg.Admin] = owner
 }
 
 func safePath(root, requested string) (string, error) {

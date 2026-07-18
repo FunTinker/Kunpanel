@@ -2,8 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -48,6 +51,23 @@ func TestLocalRegistryExtendsCatalog(t *testing.T) {
 	}
 }
 
+func TestRegistryPreservesServiceAndConfigDetails(t *testing.T) {
+	a := &app{dataDir: t.TempDir()}
+	manifest := registryManifest{ID: "demo", Name: "Demo", Version: "1.0", Install: []string{"true"}, Services: []string{"nginx"}, Config: []map[string]string{{"label": "配置", "value": "/etc/demo"}}}
+	file := registryFile{Version: "1", Apps: []registryManifest{manifest}}
+	b, _ := json.Marshal(file)
+	if err := os.MkdirAll(filepath.Dir(a.registryPath()), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(a.registryPath(), b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := a.registryManifestByID("demo")
+	if !ok || len(got.Services) != 1 || got.Services[0] != "nginx" || got.Config[0]["value"] != "/etc/demo" {
+		t.Fatalf("registry details lost: %#v", got)
+	}
+}
+
 func TestDeploymentPersistence(t *testing.T) {
 	a := &app{dataDir: t.TempDir()}
 	item := deploymentProject{ID: "demo", Name: "Demo", Compose: "services:\n  web:\n    image: nginx:alpine\n", Created: time.Now(), Updated: time.Now()}
@@ -69,5 +89,71 @@ func TestAuthenticateRBACUser(t *testing.T) {
 	}
 	if _, ok := a.authenticateUser("operator", "wrong"); ok {
 		t.Fatal("invalid password accepted")
+	}
+}
+
+func TestSetAdminPasswordSynchronizesUserDirectory(t *testing.T) {
+	oldSalt := []byte("0123456789abcdef")
+	cfg := config{Admin: "owner", PasswordSalt: b64(oldSalt), PasswordHash: hashPassword("Old-Password-2026!", oldSalt), Users: map[string]userRecord{"owner": {PasswordSalt: b64(oldSalt), PasswordHash: hashPassword("Old-Password-2026!", oldSalt), Role: "admin", Created: time.Now()}}}
+	setAdminPassword(&cfg, "New-Password-2026!")
+	a := &app{cfg: cfg}
+	if _, ok := a.authenticateUser("owner", "New-Password-2026!"); !ok {
+		t.Fatal("new administrator password was not accepted")
+	}
+	if _, ok := a.authenticateUser("owner", "Old-Password-2026!"); ok {
+		t.Fatal("old administrator password remained valid")
+	}
+}
+
+func TestLoginFailureLockout(t *testing.T) {
+	a := &app{loginAttempts: map[string]loginAttempt{}}
+	for i := 0; i < maxLoginFailures; i++ {
+		a.recordLoginFailure("owner|127.0.0.1")
+	}
+	if retry := a.loginRetryAfter("owner|127.0.0.1"); retry <= 0 {
+		t.Fatal("login attempts were not blocked")
+	}
+	a.clearLoginFailures("owner|127.0.0.1")
+	if retry := a.loginRetryAfter("owner|127.0.0.1"); retry != 0 {
+		t.Fatalf("successful login did not clear lockout: %d", retry)
+	}
+}
+
+func TestTOTPVerification(t *testing.T) {
+	secret := generateTOTPSecret()
+	now := time.Unix(1784390400, 0)
+	code := totpCode(secret, now.Unix()/30)
+	if !verifyTOTP(secret, code, now) || verifyTOTP(secret, "000000", now) && code != "000000" {
+		t.Fatal("TOTP verification failed")
+	}
+}
+
+func TestRedactSecrets(t *testing.T) {
+	value := redactSecrets("password=secret-value", []string{"secret-value"})
+	if strings.Contains(value, "secret-value") || !strings.Contains(value, "[REDACTED]") {
+		t.Fatalf("secret was not redacted: %q", value)
+	}
+}
+
+func TestViewerCannotReadPrivilegedLogsOrChangeSettings(t *testing.T) {
+	a := &app{dataDir: t.TempDir(), cfg: config{Admin: "owner", SessionKey: b64(randomBytes(32)), Users: map[string]userRecord{"owner": {Role: "admin"}, "reader": {Role: "viewer"}}}, jobs: map[string]*job{}}
+	request := func(method, target, body string) *http.Request {
+		seed := httptest.NewRequest(http.MethodGet, "http://panel.local/", nil)
+		cookieWriter := httptest.NewRecorder()
+		a.setSession(cookieWriter, seed, "reader")
+		req := httptest.NewRequest(method, target, strings.NewReader(body))
+		req.AddCookie(cookieWriter.Result().Cookies()[0])
+		return req
+	}
+	for name, call := range map[string]func(http.ResponseWriter, *http.Request){"jobs": a.handleJobs, "audit": a.handleAudit, "settings": a.handleSettings} {
+		method, body := http.MethodGet, ""
+		if name == "settings" {
+			method, body = http.MethodPut, `{"panelName":"unauthorized"}`
+		}
+		recorder := httptest.NewRecorder()
+		call(recorder, request(method, "http://panel.local/api/"+name, body))
+		if recorder.Code != http.StatusForbidden {
+			t.Fatalf("viewer %s status = %d", name, recorder.Code)
+		}
 	}
 }
