@@ -130,6 +130,7 @@ func catalog() []appSpec {
 		packageApp("golang", "Go", "Go 编译器与标准工具链，用于构建高性能服务", "运行环境", "1.20", "Go", "https://go.dev/", "BSD", []string{"Go", "编译器", "API"}, []string{"golang", "git"}, []string{"go"}),
 		packageApp("java", "OpenJDK", "OpenJDK 17 运行时，支持 Spring Boot 与 Java 应用", "运行环境", "17", "J", "https://openjdk.org/", "GPL-2.0", []string{"Java", "Spring", "运行时"}, []string{"openjdk-17-jre-headless"}, []string{"java"}),
 		packageApp("git", "Git", "版本控制工具，支持部署钩子与代码拉取", "开发工具", "2.x", "G", "https://git-scm.com/", "GPL-2.0", []string{"Git", "部署", "开发"}, []string{"git"}, []string{"git"}),
+		packageApp("ssh-tools", "SSH 节点工具", "多 VPS 密钥下发、探活和安全加固所需客户端", "运维工具", "1.x", "S", "https://www.openssh.com/", "BSD/GPL-2.0", []string{"SSH", "节点", "密钥", "VPS"}, []string{"openssh-client", "sshpass"}, []string{"ssh", "sshpass"}),
 		packageApp("composer", "Composer", "PHP 官方依赖管理器", "开发工具", "2.x", "C", "https://getcomposer.org/", "MIT", []string{"PHP", "依赖", "Laravel"}, []string{"composer"}, []string{"composer"}),
 		packageApp("supervisor", "Supervisor", "Python 进程守护与多应用进程管理", "运维工具", "4.x", "S", "http://supervisord.org/", "BSD", []string{"进程守护", "队列", "运维"}, []string{"supervisor"}, []string{"supervisord"}),
 		packageApp("memcached", "Memcached", "轻量级内存对象缓存服务", "数据库", "1.6", "M", "https://memcached.org/", "BSD", []string{"缓存", "性能"}, []string{"memcached"}, []string{"memcached"}),

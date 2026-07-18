@@ -29,3 +29,4 @@ label input:focus{border-color:#25bedf;box-shadow:0 0 0 3px #20d4fc12}
 .deployment-grid{grid-template-columns:repeat(2,minmax(0,1fr));margin-top:14px}.registry-editor{min-height:52vh}.deployment-grid .setting-card{min-height:180px}@media(max-width:800px){.deployment-grid{grid-template-columns:1fr}}
 button:disabled{opacity:.55;cursor:not-allowed}
 @media(max-width:720px){.form-grid,.engine-cards,.settings-layout,.db-browser{grid-template-columns:1fr}.audit-row{grid-template-columns:1fr 1fr}.audit-row pre{grid-column:1/-1}.modal-backdrop{padding:8px}.terminal-output{height:320px}}
+@media(max-width:720px){.page-head{flex-direction:column;align-items:stretch;gap:12px}.page-head>div{min-width:0}.page-head>.button-row{width:100%;flex-wrap:wrap}.page-head>.button-row button{flex:1 1 auto;min-width:max-content}.warning-box{overflow-wrap:anywhere}}

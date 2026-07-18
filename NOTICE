@@ -1,5 +1,9 @@
 KunPanel is distributed under the Apache License, Version 2.0.
 
+The multi-VPS SSH management workflow is inspired by ssh-vps-skill,
+Copyright (c) 2026 xiaov, distributed under the MIT License.
+https://github.com/xiao-vvv/ssh-vps-skill
+
 KunPanel may install or integrate third-party software. Each application
 entry declares its upstream source and license where known. Third-party
 software remains subject to its own license and trademark terms.

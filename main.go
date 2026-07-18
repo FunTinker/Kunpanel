@@ -32,7 +32,7 @@ import (
 
 const (
 	addr              = "127.0.0.1:8088"
-	panelVersion      = "0.5.1"
+	panelVersion      = "0.6.0"
 	sessionMaxAge     = 12 * time.Hour
 	maintenanceMaxAge = 10 * time.Minute
 )
@@ -87,6 +87,8 @@ type loginAttempt struct {
 
 type app struct {
 	mu                   sync.RWMutex
+	nodeMu               sync.RWMutex
+	nodeOpMu             sync.Mutex
 	cfg                  config
 	cfgPath              string
 	dataDir              string
@@ -226,6 +228,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("/api/system/action", a.auth(a.handleSystemAction))
 	mux.HandleFunc("/api/docker", a.auth(a.handleDocker))
 	mux.HandleFunc("/api/deployments", a.auth(a.handleDeployments))
+	mux.HandleFunc("/api/nodes", a.auth(a.handleNodes))
 	mux.HandleFunc("/", serveSPA)
 	return securityHeaders(a.csrf(mux))
 }
