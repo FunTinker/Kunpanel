@@ -43,12 +43,21 @@ type job struct {
 }
 
 type appSpec struct {
-	ID       string
-	Name     string
-	Desc     string
-	Category string
-	Commands []string
-	Checks   []string
+	ID          string
+	Name        string
+	Desc        string
+	Category    string
+	Version     string
+	Icon        string
+	Homepage    string
+	License     string
+	Tags        []string
+	Source      string
+	InstallSize string
+	Commands    []string
+	Remove      []string
+	Update      []string
+	Checks      []string
 }
 
 type firewallRule struct {
@@ -77,6 +86,13 @@ var (
 		{"redis-server", "Redis", "6379"},
 		{"postgresql", "PostgreSQL", "5432"},
 		{"fail2ban", "Fail2ban", "—"},
+		{"supervisor", "Supervisor", "—"},
+		{"memcached", "Memcached", "11211"},
+		{"rabbitmq-server", "RabbitMQ", "5672 / 15672"},
+		{"haproxy", "HAProxy", "80 / 443"},
+		{"postfix", "Postfix", "25 / 587"},
+		{"smbd", "Samba", "445"},
+		{"clamav-daemon", "ClamAV", "—"},
 	}
 )
 
@@ -99,46 +115,65 @@ func serviceInstalled(name string) bool {
 }
 
 func catalog() []appSpec {
-	return []appSpec{
-		{"lnmp", "LNMP 环境", "Nginx + MariaDB + PHP 8.2 常用扩展", "运行环境",
-			[]string{"apt-get update", "DEBIAN_FRONTEND=noninteractive apt-get install -y nginx mariadb-server php8.2-fpm php8.2-cli php8.2-mysql php8.2-curl php8.2-gd php8.2-mbstring php8.2-xml php8.2-zip", "systemctl enable --now nginx mariadb php8.2-fpm"},
-			[]string{"nginx", "mysql", "php"}},
-		{"docker", "Docker Engine", "Debian 官方 docker.io 与 Compose 插件", "容器",
-			[]string{"apt-get update", "DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-compose-plugin", "systemctl enable --now docker"},
-			[]string{"docker"}},
-		{"redis", "Redis", "高性能内存数据库", "数据库",
-			[]string{"apt-get update", "DEBIAN_FRONTEND=noninteractive apt-get install -y redis-server", "systemctl enable --now redis-server"},
-			[]string{"redis-server"}},
-		{"postgres", "PostgreSQL", "可靠的开源关系型数据库", "数据库",
-			[]string{"apt-get update", "DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql postgresql-contrib", "systemctl enable --now postgresql"},
-			[]string{"psql"}},
-		{"fail2ban", "Fail2ban", "自动封禁恶意登录来源", "安全",
-			[]string{"apt-get update", "DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban", "systemctl enable --now fail2ban"},
-			[]string{"fail2ban-client"}},
-		{"nftables", "nftables", "Debian 原生防火墙管理框架", "安全",
-			[]string{"apt-get update", "DEBIAN_FRONTEND=noninteractive apt-get install -y nftables", "systemctl enable --now nftables"},
-			[]string{"nft"}},
+	apps := []appSpec{
+		{"lnmp", "LNMP 环境", "Nginx + MariaDB + PHP 8.2 常用扩展", "运行环境", "1.0", "L", "https://www.nginx.com/", "BSD/GPL", []string{"nginx", "php", "mariadb", "建站"}, "Debian", "350 MB", []string{"apt-get update", "DEBIAN_FRONTEND=noninteractive apt-get install -y nginx mariadb-server php8.2-fpm php8.2-cli php8.2-mysql php8.2-curl php8.2-gd php8.2-mbstring php8.2-xml php8.2-zip", "systemctl enable --now nginx mariadb php8.2-fpm"}, []string{"DEBIAN_FRONTEND=noninteractive apt-get purge -y nginx mariadb-server php8.2-fpm php8.2-cli php8.2-mysql php8.2-curl php8.2-gd php8.2-mbstring php8.2-xml php8.2-zip", "apt-get autoremove -y"}, []string{"apt-get update", "DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y nginx mariadb-server php8.2-fpm php8.2-cli"}, []string{"nginx", "mysql", "php"}},
+		{"docker", "Docker Engine", "Debian 官方 Docker Engine 与 Compose 插件", "容器", "24.x", "D", "https://docs.docker.com/", "Apache-2.0", []string{"容器", "Compose", "部署"}, "Debian", "220 MB", []string{"apt-get update", "DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-compose-plugin", "systemctl enable --now docker"}, []string{"DEBIAN_FRONTEND=noninteractive apt-get purge -y docker.io docker-compose-plugin", "apt-get autoremove -y"}, []string{"apt-get update", "DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y docker.io docker-compose-plugin"}, []string{"docker"}},
+		{"redis", "Redis", "高性能内存数据库，支持持久化与缓存", "数据库", "7.x", "R", "https://redis.io/", "BSD", []string{"缓存", "队列", "数据库"}, "Debian", "45 MB", []string{"apt-get update", "DEBIAN_FRONTEND=noninteractive apt-get install -y redis-server", "systemctl enable --now redis-server"}, []string{"DEBIAN_FRONTEND=noninteractive apt-get purge -y redis-server", "apt-get autoremove -y"}, []string{"apt-get update", "DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y redis-server"}, []string{"redis-server"}},
+		{"postgres", "PostgreSQL", "可靠的开源关系型数据库与扩展生态", "数据库", "15.x", "P", "https://www.postgresql.org/", "PostgreSQL", []string{"数据库", "SQL", "GIS"}, "Debian", "180 MB", []string{"apt-get update", "DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql postgresql-contrib", "systemctl enable --now postgresql"}, []string{"DEBIAN_FRONTEND=noninteractive apt-get purge -y postgresql postgresql-contrib", "apt-get autoremove -y"}, []string{"apt-get update", "DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y postgresql postgresql-contrib"}, []string{"psql"}},
+		{"fail2ban", "Fail2ban", "自动封禁恶意登录来源，保护 SSH 与 Web 服务", "安全", "1.0", "F", "https://www.fail2ban.org/", "GPL-2.0", []string{"安全", "SSH", "防爆破"}, "Debian", "20 MB", []string{"apt-get update", "DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban", "systemctl enable --now fail2ban"}, []string{"DEBIAN_FRONTEND=noninteractive apt-get purge -y fail2ban", "apt-get autoremove -y"}, []string{"apt-get update", "DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y fail2ban"}, []string{"fail2ban-client"}},
+		{"nftables", "nftables", "Debian 原生防火墙管理框架，默认拒绝并保护 SSH", "安全", "1.0", "N", "https://wiki.nftables.org/", "GPL-2.0", []string{"安全", "防火墙", "网络"}, "Debian", "12 MB", []string{"apt-get update", "DEBIAN_FRONTEND=noninteractive apt-get install -y nftables", "systemctl enable --now nftables"}, []string{"DEBIAN_FRONTEND=noninteractive apt-get purge -y nftables", "apt-get autoremove -y"}, []string{"apt-get update", "DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y nftables"}, []string{"nft"}},
 	}
+	apps = append(apps,
+		packageApp("php", "PHP 8.2", "PHP-FPM 与常用扩展，适用于 Laravel、WordPress 和传统 PHP 站点", "运行环境", "8.2", "P", "https://www.php.net/", "PHP-3.01", []string{"php", "php-fpm", "Laravel", "WordPress"}, []string{"php8.2", "php8.2-fpm", "php8.2-cli", "php8.2-mysql", "php8.2-curl", "php8.2-gd", "php8.2-mbstring", "php8.2-xml", "php8.2-zip"}, []string{"php"}),
+		packageApp("nodejs", "Node.js", "JavaScript 服务端运行时，包含 npm 包管理器", "运行环境", "18 LTS", "J", "https://nodejs.org/", "MIT", []string{"Node.js", "npm", "前端"}, []string{"nodejs", "npm"}, []string{"node"}),
+		packageApp("python", "Python 3", "Python 3、虚拟环境与 pip，适合 API 和自动化服务", "运行环境", "3.11", "Py", "https://www.python.org/", "PSF", []string{"Python", "API", "自动化"}, []string{"python3", "python3-venv", "python3-pip", "pipx"}, []string{"python3"}),
+		packageApp("golang", "Go", "Go 编译器与标准工具链，用于构建高性能服务", "运行环境", "1.20", "Go", "https://go.dev/", "BSD", []string{"Go", "编译器", "API"}, []string{"golang", "git"}, []string{"go"}),
+		packageApp("java", "OpenJDK", "OpenJDK 17 运行时，支持 Spring Boot 与 Java 应用", "运行环境", "17", "J", "https://openjdk.org/", "GPL-2.0", []string{"Java", "Spring", "运行时"}, []string{"openjdk-17-jre-headless"}, []string{"java"}),
+		packageApp("git", "Git", "版本控制工具，支持部署钩子与代码拉取", "开发工具", "2.x", "G", "https://git-scm.com/", "GPL-2.0", []string{"Git", "部署", "开发"}, []string{"git"}, []string{"git"}),
+		packageApp("composer", "Composer", "PHP 官方依赖管理器", "开发工具", "2.x", "C", "https://getcomposer.org/", "MIT", []string{"PHP", "依赖", "Laravel"}, []string{"composer"}, []string{"composer"}),
+		packageApp("supervisor", "Supervisor", "Python 进程守护与多应用进程管理", "运维工具", "4.x", "S", "http://supervisord.org/", "BSD", []string{"进程守护", "队列", "运维"}, []string{"supervisor"}, []string{"supervisord"}),
+		packageApp("memcached", "Memcached", "轻量级内存对象缓存服务", "数据库", "1.6", "M", "https://memcached.org/", "BSD", []string{"缓存", "性能"}, []string{"memcached"}, []string{"memcached"}),
+		packageApp("rabbitmq", "RabbitMQ", "可靠消息队列，支持 AMQP 与任务异步化", "数据库", "3.x", "Q", "https://www.rabbitmq.com/", "MPL-2.0", []string{"队列", "消息", "异步"}, []string{"rabbitmq-server"}, []string{"rabbitmqctl"}),
+		packageApp("haproxy", "HAProxy", "高性能 TCP/HTTP 负载均衡与健康检查", "网络服务", "2.x", "H", "https://www.haproxy.org/", "GPL-2.0", []string{"负载均衡", "代理", "高可用"}, []string{"haproxy"}, []string{"haproxy"}),
+		packageApp("certbot", "Certbot", "Let's Encrypt 自动签发与续期工具", "安全", "2.x", "C", "https://certbot.eff.org/", "Apache-2.0", []string{"TLS", "HTTPS", "证书"}, []string{"certbot", "python3-certbot-nginx"}, []string{"certbot"}),
+		packageApp("clamav", "ClamAV", "开源病毒扫描器，可配合上传和备份任务", "安全", "1.x", "C", "https://www.clamav.net/", "GPL-2.0", []string{"安全", "杀毒", "扫描"}, []string{"clamav", "clamav-daemon"}, []string{"clamscan"}),
+		packageApp("samba", "Samba", "SMB/CIFS 文件共享服务", "文件服务", "4.x", "S", "https://www.samba.org/", "GPL-3.0", []string{"文件共享", "SMB", "局域网"}, []string{"samba"}, []string{"smbd"}),
+		packageApp("rsync", "Rsync", "增量同步与远程备份工具", "备份工具", "3.x", "R", "https://rsync.samba.org/", "GPL-3.0", []string{"备份", "同步", "增量"}, []string{"rsync"}, []string{"rsync"}),
+		packageApp("imagemagick", "ImageMagick", "服务器端图片转换、缩略图与格式处理", "媒体工具", "6/7", "I", "https://imagemagick.org/", "ImageMagick", []string{"图片", "缩略图", "媒体"}, []string{"imagemagick"}, []string{"convert"}),
+		packageApp("ffmpeg", "FFmpeg", "音视频转码、截图与媒体处理工具链", "媒体工具", "5.x", "F", "https://ffmpeg.org/", "LGPL/GPL", []string{"视频", "音频", "转码"}, []string{"ffmpeg"}, []string{"ffmpeg"}),
+		packageApp("phpmyadmin", "phpMyAdmin", "MariaDB/MySQL 可视化管理工具", "建站", "5.x", "P", "https://www.phpmyadmin.net/", "GPL-2.0", []string{"MySQL", "MariaDB", "Web 管理"}, []string{"phpmyadmin"}, []string{"phpmyadmin"}),
+		packageApp("drupal", "Drupal 依赖", "为 Drupal 站点准备 PHP、Composer 与扩展", "建站", "10.x", "D", "https://www.drupal.org/", "GPL-2.0", []string{"CMS", "PHP", "建站"}, []string{"php8.2-cli", "php8.2-xml", "php8.2-gd", "php8.2-mbstring", "composer"}, []string{"php"}),
+		packageApp("laravel", "Laravel 运行环境", "Laravel 所需 PHP 扩展、Composer 与进程守护", "建站", "10/11", "L", "https://laravel.com/", "MIT", []string{"Laravel", "PHP", "队列"}, []string{"php8.2-cli", "php8.2-mbstring", "php8.2-xml", "php8.2-curl", "php8.2-zip", "composer", "supervisor"}, []string{"php", "composer"}),
+		packageApp("postfix", "Postfix", "SMTP 邮件发送服务，适合站点通知和系统邮件", "网络服务", "3.x", "M", "http://www.postfix.org/", "EPL-2.0", []string{"邮件", "SMTP", "通知"}, []string{"postfix"}, []string{"postfix"}),
+	)
+	return apps
+}
+
+func packageApp(id, name, desc, category, version, icon, homepage, license string, tags, packages, checks []string) appSpec {
+	install := []string{"apt-get update", fmt.Sprintf("DEBIAN_FRONTEND=noninteractive apt-get install -y %s", strings.Join(packages, " "))}
+	remove := []string{fmt.Sprintf("DEBIAN_FRONTEND=noninteractive apt-get purge -y %s", strings.Join(packages, " ")), "apt-get autoremove -y"}
+	update := []string{"apt-get update", fmt.Sprintf("DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y %s", strings.Join(packages, " "))}
+	return appSpec{ID: id, Name: name, Desc: desc, Category: category, Version: version, Icon: icon, Homepage: homepage, License: license, Tags: tags, Source: "Debian 官方仓库", InstallSize: "按依赖变化", Commands: install, Remove: remove, Update: update, Checks: checks}
 }
 
 func appCatalog() []map[string]any {
 	specs := catalog()
 	out := make([]map[string]any, 0, len(specs))
 	for _, s := range specs {
-		installed := true
-		for _, check := range s.Checks {
-			if !commandExists(check) {
-				installed = false
-			}
-		}
+		installed := appInstalled(s)
 		out = append(out, map[string]any{
 			"id": s.ID, "name": s.Name, "desc": s.Desc, "category": s.Category,
+			"version": s.Version, "icon": s.Icon, "homepage": s.Homepage, "license": s.License,
+			"tags": s.Tags, "source": s.Source, "installSize": s.InstallSize,
 			"verified": true, "installed": installed,
+			"actions": appActions(s, installed),
 		})
 	}
 	out = append(out, map[string]any{
 		"id": "wordpress", "name": "WordPress 一键建站", "desc": "创建数据库、下载程序并生成安全配置", "category": "建站",
-		"verified": true, "installed": false, "orchestrated": true,
+		"version": "6.x", "icon": "W", "homepage": "https://wordpress.org/", "license": "GPL-2.0",
+		"tags": []string{"CMS", "PHP", "建站", "一键部署"}, "source": "WordPress 官方下载源", "installSize": "约 120 MB",
+		"verified": true, "installed": false, "orchestrated": true, "actions": []string{"install"},
 	})
 	return out
 }
@@ -152,7 +187,9 @@ func (a *app) handleAppDetail(w http.ResponseWriter, r *http.Request) {
 	if id == "wordpress" {
 		writeJSON(w, 200, map[string]any{
 			"id": "wordpress", "name": "WordPress 一键建站", "desc": "创建数据库、下载 WordPress、生成 Nginx 站点并初始化管理员。",
-			"category": "建站", "verified": true, "installed": false, "orchestrated": true,
+			"category": "建站", "version": "6.x", "icon": "W", "homepage": "https://wordpress.org/", "license": "GPL-2.0",
+			"tags": []string{"CMS", "PHP", "建站", "一键部署"}, "source": "WordPress 官方下载源", "installSize": "约 120 MB",
+			"verified": true, "installed": false, "orchestrated": true, "actions": []string{"install"},
 			"services": appServiceStates("wordpress"),
 			"checks":   []string{"nginx", "mysql", "php", "curl"},
 			"config": []map[string]string{
@@ -167,31 +204,51 @@ func (a *app) handleAppDetail(w http.ResponseWriter, r *http.Request) {
 		if spec.ID != id {
 			continue
 		}
-		installed := true
-		for _, check := range spec.Checks {
-			if !commandExists(check) {
-				installed = false
-			}
-		}
+		installed := appInstalled(spec)
 		writeJSON(w, 200, map[string]any{
 			"id": spec.ID, "name": spec.Name, "desc": spec.Desc, "category": spec.Category,
+			"version": spec.Version, "icon": spec.Icon, "homepage": spec.Homepage, "license": spec.License,
+			"tags": spec.Tags, "source": spec.Source, "installSize": spec.InstallSize,
 			"verified": true, "installed": installed, "checks": spec.Checks, "commands": spec.Commands,
 			"services": appServiceStates(spec.ID), "config": appConfigHints(spec.ID),
+			"actions": appActions(spec, installed),
 		})
 		return
 	}
 	writeJSON(w, 404, map[string]string{"error": "应用不存在"})
 }
 
+func appActions(spec appSpec, installed bool) []string {
+	if installed {
+		actions := []string{"update", "uninstall"}
+		if len(spec.Update) == 0 {
+			actions = actions[1:]
+		}
+		if len(spec.Remove) == 0 {
+			actions = actions[:1]
+		}
+		return actions
+	}
+	return []string{"install"}
+}
+
 func appServiceStates(id string) []map[string]any {
 	names := map[string][]string{
-		"lnmp":      {"nginx", "mariadb", "php8.2-fpm"},
-		"docker":    {"docker"},
-		"redis":     {"redis-server"},
-		"postgres":  {"postgresql"},
-		"fail2ban":  {"fail2ban"},
-		"nftables":  {"nftables"},
-		"wordpress": {"nginx", "mariadb", "php8.2-fpm"},
+		"lnmp":       {"nginx", "mariadb", "php8.2-fpm"},
+		"php":        {"php8.2-fpm"},
+		"docker":     {"docker"},
+		"redis":      {"redis-server"},
+		"postgres":   {"postgresql"},
+		"fail2ban":   {"fail2ban"},
+		"nftables":   {"nftables"},
+		"supervisor": {"supervisor"},
+		"memcached":  {"memcached"},
+		"rabbitmq":   {"rabbitmq-server"},
+		"haproxy":    {"haproxy"},
+		"postfix":    {"postfix"},
+		"samba":      {"smbd"},
+		"clamav":     {"clamav-daemon"},
+		"wordpress":  {"nginx", "mariadb", "php8.2-fpm"},
 	}[id]
 	var out []map[string]any
 	for _, service := range managedServices() {
@@ -273,8 +330,8 @@ func (a *app) handleAppAction(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	if in.Action != "install" {
-		writeJSON(w, 400, map[string]string{"error": "当前只支持安装操作"})
+	if !oneOf(in.Action, "install", "update", "uninstall") {
+		writeJSON(w, 400, map[string]string{"error": "不支持的应用操作"})
 		return
 	}
 	var selected *appSpec
@@ -289,8 +346,40 @@ func (a *app) handleAppAction(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 404, map[string]string{"error": "应用不存在"})
 		return
 	}
-	j := a.startJob("安装 "+selected.Name, selected.Commands, r)
+	installed := appInstalled(*selected)
+	if in.Action == "install" && installed {
+		writeJSON(w, 409, map[string]string{"error": "应用已经安装"})
+		return
+	}
+	if in.Action != "install" && !installed {
+		writeJSON(w, 409, map[string]string{"error": "应用尚未安装"})
+		return
+	}
+	commands := selected.Commands
+	verb := "安装"
+	if in.Action == "update" {
+		commands, verb = selected.Update, "更新"
+	} else if in.Action == "uninstall" {
+		commands, verb = selected.Remove, "卸载"
+	}
+	if len(commands) == 0 {
+		writeJSON(w, 400, map[string]string{"error": "此应用暂不支持该操作"})
+		return
+	}
+	j := a.startJob(verb+" "+selected.Name, commands, r)
 	writeJSON(w, 202, j)
+}
+
+func appInstalled(spec appSpec) bool {
+	if len(spec.Checks) == 0 {
+		return false
+	}
+	for _, check := range spec.Checks {
+		if !commandExists(check) {
+			return false
+		}
+	}
+	return true
 }
 
 func (a *app) startJob(name string, commands []string, r *http.Request) *job {

@@ -189,6 +189,12 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("/api/advanced/notifications", a.auth(a.handleNotifications))
 	mux.HandleFunc("/api/advanced/upgrade", a.auth(a.handleUpgrade))
 	mux.HandleFunc("/api/advanced/cloudflare", a.auth(a.handleCloudflare))
+	mux.HandleFunc("/api/system/processes", a.auth(a.handleSystemProcesses))
+	mux.HandleFunc("/api/system/network", a.auth(a.handleSystemNetwork))
+	mux.HandleFunc("/api/system/disks", a.auth(a.handleSystemDisks))
+	mux.HandleFunc("/api/system/logs", a.auth(a.handleSystemLogs))
+	mux.HandleFunc("/api/system/action", a.auth(a.handleSystemAction))
+	mux.HandleFunc("/api/docker", a.auth(a.handleDocker))
 	mux.HandleFunc("/", serveSPA)
 	return securityHeaders(a.csrf(mux))
 }
