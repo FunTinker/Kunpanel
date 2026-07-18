@@ -60,7 +60,7 @@ func (a *app) handlePTY(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, 200, map[string]any{"id": id, "output": out})
 	case http.MethodPost:
-		var in struct{ Action, ID, Data string }
+		var in struct{ Action, ID, Data, Node string }
 		if !decodeJSON(w, r, &in) {
 			return
 		}
@@ -75,9 +75,34 @@ func (a *app) handlePTY(w http.ResponseWriter, r *http.Request) {
 		switch in.Action {
 		case "create":
 			_, err := runCommand(10*time.Second, "tmux", "new-session", "-d", "-s", session, "-x", "140", "-y", "40", "/bin/bash")
-			if err != nil && !strings.Contains(err.Error(), "duplicate") {
-				writeJSON(w, 500, map[string]string{"error": err.Error()})
-				return
+			createdNew := err == nil
+			if err != nil {
+				if _, existsErr := runCommand(10*time.Second, "tmux", "has-session", "-t", session); existsErr != nil {
+					writeJSON(w, 500, map[string]string{"error": err.Error()})
+					return
+				}
+			}
+			if in.Node != "" && createdNew {
+				node, nodeErr := a.resolveNode(in.Node)
+				if nodeErr != nil {
+					_, _ = runCommand(10*time.Second, "tmux", "kill-session", "-t", session)
+					writeJSON(w, 400, map[string]string{"error": nodeErr.Error()})
+					return
+				}
+				if keyErr := a.ensureNodeKey(); keyErr != nil {
+					_, _ = runCommand(10*time.Second, "tmux", "kill-session", "-t", session)
+					writeJSON(w, 500, map[string]string{"error": keyErr.Error()})
+					return
+				}
+				parts := append([]string{"ssh"}, a.nodeSSHArgs(node, node.Port)...)
+				quoted := make([]string, len(parts))
+				for i, part := range parts {
+					quoted[i] = shellQuote(part)
+				}
+				command := "exec " + strings.Join(quoted, " ")
+				_, _ = runCommand(10*time.Second, "tmux", "send-keys", "-t", session, "-l", command)
+				_, _ = runCommand(10*time.Second, "tmux", "send-keys", "-t", session, "Enter")
+				a.audit(r, "pty.remote", node.Alias, true, "interactive managed SSH session")
 			}
 			_, _ = runCommand(10*time.Second, "tmux", "set-option", "-t", session, "remain-on-exit", "on")
 			a.audit(r, "pty.create", in.ID, true, "interactive tmux session")

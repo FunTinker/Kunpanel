@@ -1,8 +1,8 @@
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
-const state = { page: 'overview', range: '1h', overview: null, metrics: [], filePath: '', jobs: [], role: '', user: '', twoFactor: false };
-const icons = { overview:'⌁',sites:'◫',apps:'◇',deploy:'⇧',database:'⬡',files:'▱',firewall:'⛨',system:'▦',terminal:'⌘',security:'◉',settings:'⚙' };
-const nav = [['overview','总览'],['sites','网站'],['apps','应用商城'],['deploy','部署中心'],['database','数据库'],['files','文件管理'],['firewall','防火墙'],['system','系统工具'],['terminal','终端'],['security','安全中心'],['settings','面板设置']];
+const state = { page: 'overview', range: '1h', overview: null, metrics: [], filePath: '', jobs: [], role: '', user: '', twoFactor: false, nodeStatus: {}, remoteNode: '' };
+const icons = { overview:'⌁',sites:'◫',apps:'◇',deploy:'⇧',nodes:'⌘',database:'⬡',files:'▱',firewall:'⛨',system:'▦',terminal:'⌘',security:'◉',settings:'⚙' };
+const nav = [['overview','总览'],['sites','网站'],['apps','应用商城'],['deploy','部署中心'],['nodes','节点管理'],['database','数据库'],['files','文件管理'],['firewall','防火墙'],['system','系统工具'],['terminal','终端'],['security','安全中心'],['settings','面板设置']];
 
 async function unlockMaintenance() {
   const password = prompt('Admin password required for this sensitive action');
@@ -89,7 +89,7 @@ async function renderOverview() {
   document.body.innerHTML=shell(`${pageHead('服务器总览','实时硬件、网络与核心服务状态。',`<div class="server-pill"><span></span>${esc(o.hostname||'—')} · ${esc(o.ip||'—')}</div>`)}
   <div class="metrics">${metricCard('CPU 使用率',(m.cpu||0).toFixed(1),'%','cyan',`${o.cpuCores||0} 核心 · 负载 ${o.load||'—'}`)}${metricCard('内存使用率',(m.memory||0).toFixed(1),'%','violet','每 5 秒采样')}${metricCard('磁盘使用率',(m.disk||0).toFixed(1),'%','green','系统盘 /')}${metricCard('实时网络',(m.network||0).toFixed(1),' KB/s','orange','上行 + 下行')}</div>
   <div class="grid-main"><article class="panel chart-panel"><div class="panel-title"><div><h2>资源趋势</h2><p>短周期保留精度，长周期自动聚合</p></div><div class="range">${['1h','6h','24h','7d','30d'].map(x=>`<button data-range="${x}" class="${state.range===x?'active':''}">${x}</button>`).join('')}</div></div><div class="legend"><span class="cpu">CPU</span><span class="memory">内存</span><span class="network">网络</span></div><div class="chart-wrap"><canvas id="chart"></canvas></div></article>
-  <article class="panel info-panel"><div class="panel-title"><div><h2>服务器信息</h2><p>当前节点详情</p></div></div>${infoRow('主机名',o.hostname||'—')}${infoRow('操作系统',o.os||'—')}${infoRow('架构',o.kernel||'—')}${infoRow('面板运行时间',o.uptime||'—')}${infoRow('面板版本','v0.5.1')}</article></div>
+  <article class="panel info-panel"><div class="panel-title"><div><h2>服务器信息</h2><p>当前节点详情</p></div></div>${infoRow('主机名',o.hostname||'—')}${infoRow('操作系统',o.os||'—')}${infoRow('架构',o.kernel||'—')}${infoRow('面板运行时间',o.uptime||'—')}${infoRow('面板版本','v0.6.0')}</article></div>
   <div class="grid-bottom"><article class="panel"><div class="panel-title"><div><h2>核心服务</h2><p>可直接启停与重启</p></div><button class="link" data-page="apps">应用商店 →</button></div><div id="services" class="services"></div></article>
   <article class="panel"><div class="panel-title"><div><h2>最近任务</h2><p>安装与系统操作</p></div><button class="link" id="view-jobs">全部任务 →</button></div><div id="recent-jobs" class="compact-list">暂无任务</div></article></div>`);
   bindShell(); drawChart();
@@ -156,6 +156,31 @@ async function deploymentAction(id,action){if(action==='remote-push'){const j=aw
 function registryEditor(registry){modal('扩展应用清单',`<form><div class="warning-box">自定义清单中的命令会以 root 权限运行。只发布经过审核的固定命令。</div><textarea class="editor registry-editor" name="registry" spellcheck="false">${esc(JSON.stringify({version:registry.version||'1',apps:registry.apps||[]},null,2))}</textarea><div class="form-error"></div><button class="primary" type="submit">验证并发布</button></form>`,async fd=>{let value;try{value=JSON.parse(fd.get('registry'))}catch{throw new Error('JSON 格式无效')}await api('/api/apps/registry',{method:'POST',body:JSON.stringify(value)});toast('应用清单已发布');deploymentsView()},true)}
 function remoteBackupModal(current){modal('远程备份',`<form><p class="muted">先使用 rclone config 配置凭据，面板只保存远程名称和目标路径。</p><label>rclone 远程名称<input name="remote" value="${esc(current.remote||'')}" placeholder="s3backup"></label><label>远程目录<input name="path" value="${esc(current.path||'')}" placeholder="kunpanel/server-1"></label><label class="check"><input name="enabled" type="checkbox" ${current.enabled?'checked':''}> 启用远程备份</label><div class="form-error"></div><button class="primary" type="submit">保存设置</button></form>`,async fd=>{await api('/api/advanced/remote-backups',{method:'POST',body:JSON.stringify({action:'configure',remote:fd.get('remote'),path:fd.get('path'),enabled:fd.has('enabled')})});toast('远程备份设置已保存');deploymentsView()})}
 
+async function nodesView(){
+  const data=await api('/api/nodes'),items=data.nodes||[],admin=state.role==='admin',disabled=admin?'':'disabled';
+  document.body.innerHTML=shell(`${pageHead('节点管理','统一管理多台 VPS 的 SSH 密钥、连接状态、安全策略和远程巡检。',`<div class="button-row"><button class="outline" id="probe-nodes">批量探活</button><button class="outline" id="init-node-key" ${disabled}>${data.keyReady?'密钥已就绪':'初始化密钥'}</button><button class="primary compact" id="add-node" ${disabled}>+ 添加节点</button></div>`)}
+  ${!data.passwordBootstrapReady?'<div class="warning-box">一次性密码下发公钥需要在面板服务器安装 sshpass 与 openssh-client；也可以手动复制下方公钥。</div>':''}
+  <div class="grid-bottom node-summary"><article class="panel"><div class="panel-title"><div><h2>面板公钥</h2><p>私钥只保存在面板数据目录，不通过 API 返回。</p></div></div><pre class="config-preview">${esc(data.publicKey||'尚未初始化 Ed25519 密钥')}</pre></article>
+  <article class="panel info-panel">${infoRow('节点数量',items.length)}${infoRow('密钥状态',data.keyReady?'已就绪':'未初始化')}${infoRow('密码引导',data.passwordBootstrapReady?'可用':'缺少 sshpass')}</article></div>
+  <article class="panel"><div class="panel-title"><div><h2>受管节点</h2><p>端口变更采用新旧端口并存、实测、最终切换流程。</p></div></div><table><thead><tr><th>别名</th><th>地址</th><th>用户</th><th>状态</th><th>操作</th></tr></thead><tbody>${items.map(n=>{const status=state.nodeStatus[n.alias];return `<tr><td><strong>${esc(n.alias)}</strong></td><td>${esc(n.host)}:${esc(n.port)}</td><td>${esc(n.user)}</td><td>${status===true?'<span class="safe">在线</span>':status===false?'<span class="danger-badge">离线</span>':'未检测'}</td><td class="actions"><button class="tiny" data-node-info="${esc(n.alias)}">信息</button> <button class="tiny" data-node-terminal="${esc(n.alias)}" ${disabled}>终端</button> <button class="tiny" data-node-run="${esc(n.alias)}" ${disabled}>命令</button> <button class="tiny" data-node-sync="${esc(n.alias)}" ${disabled}>下发公钥</button> <button class="tiny" data-node-lock="${esc(n.alias)}" ${disabled}>关闭密码</button> <button class="tiny" data-node-port="${esc(n.alias)}" data-port="${esc(n.port)}" ${disabled}>改端口</button> <button class="danger-text" data-node-delete="${esc(n.alias)}" ${disabled}>删除</button></td></tr>`}).join('')||'<tr><td colspan="5">尚未添加节点</td></tr>'}</tbody></table></article>`);
+  bindShell();
+  $('#probe-nodes').onclick=probeNodes;$('#init-node-key').onclick=async()=>{await api('/api/nodes',{method:'POST',body:JSON.stringify({action:'init-key'})});toast('面板 SSH 密钥已就绪');nodesView()};$('#add-node').onclick=nodeAddModal;
+  $$('[data-node-info]').forEach(b=>b.onclick=()=>nodeInfo(b.dataset.nodeInfo));
+  $$('[data-node-terminal]').forEach(b=>b.onclick=()=>{state.remoteNode=b.dataset.nodeTerminal;navigate('terminal')});
+  $$('[data-node-run]').forEach(b=>b.onclick=()=>nodeRunModal(b.dataset.nodeRun));
+  $$('[data-node-sync]').forEach(b=>b.onclick=()=>nodeSyncModal(b.dataset.nodeSync));
+  $$('[data-node-lock]').forEach(b=>b.onclick=()=>nodeLockModal(b.dataset.nodeLock));
+  $$('[data-node-port]').forEach(b=>b.onclick=()=>nodePortModal(b.dataset.nodePort,Number(b.dataset.port)));
+  $$('[data-node-delete]').forEach(b=>b.onclick=async()=>{const alias=b.dataset.nodeDelete,confirmText=prompt(`输入 DELETE ${alias} 确认删除`);if(confirmText!==`DELETE ${alias}`)return;await api('/api/nodes',{method:'POST',body:JSON.stringify({action:'delete',alias,confirm:confirmText})});toast('节点已删除');nodesView()});
+}
+async function probeNodes(){const result=await api('/api/nodes',{method:'POST',body:JSON.stringify({action:'probe-all'})});state.nodeStatus=Object.fromEntries(result.map(x=>[x.alias,x.online]));toast(`探活完成：${result.filter(x=>x.online).length}/${result.length} 在线`);nodesView()}
+function nodeAddModal(){modal('添加 VPS 节点',`<form><div class="form-grid"><label>节点别名<input name="alias" required pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,127}" placeholder="tokyo-1"></label><label>主机名或 IP<input name="host" required placeholder="203.0.113.10"></label></div><div class="form-grid"><label>SSH 用户<input name="user" value="root" required></label><label>SSH 端口<input name="port" type="number" min="1" max="65535" value="22" required></label></div><label>一次性密码（可选，不保存）<input name="password" type="password" autocomplete="new-password" placeholder="填写后同时下发公钥"></label><div class="form-error"></div><button class="primary" type="submit">保存节点</button></form>`,async fd=>{const v=Object.fromEntries(fd);v.action='add';v.port=Number(v.port);const result=await api('/api/nodes',{method:'POST',body:JSON.stringify(v)});toast(result.job?'节点已保存，公钥下发任务已启动':'节点已保存');if(result.job)watchJob(result.job.id);nodesView()})}
+async function nodeInfo(alias){const data=await api('/api/nodes',{method:'POST',body:JSON.stringify({action:'info',alias})});modal(`节点信息：${alias}`,`<pre class="log-viewer">${esc(data.output)}</pre>`,null,true)}
+function nodeSyncModal(alias){modal(`下发公钥：${alias}`,`<form><div class="warning-box">密码只用于本次 sshpass 进程，不保存、不写入任务或审计日志。</div><label>节点当前密码<input name="password" type="password" required></label><div class="form-error"></div><button class="primary" type="submit">下发并验证密钥</button></form>`,async fd=>{const job=await api('/api/nodes',{method:'POST',body:JSON.stringify({action:'sync-key',alias,password:fd.get('password')})});toast('公钥下发任务已启动');watchJob(job.id)})}
+function nodeLockModal(alias){modal(`关闭密码登录：${alias}`,`<form><div class="warning-box">面板会先验证密钥登录，再写入 SSH 加固配置并执行 sshd -t；验证失败不会修改。</div><label>输入 LOCK ${esc(alias)}<input name="confirm" required></label><div class="form-error"></div><button class="danger" type="submit">关闭密码登录</button></form>`,async fd=>{const job=await api('/api/nodes',{method:'POST',body:JSON.stringify({action:'lock',alias,confirm:fd.get('confirm')})});toast('SSH 加固任务已启动');watchJob(job.id)})}
+function nodePortModal(alias,current){modal(`修改 SSH 端口：${alias}`,`<form><div class="warning-box">请先在服务商安全组放行新端口。面板会保留旧端口、实测新端口，失败时自动回滚。</div><label>新端口<input name="newPort" type="number" min="1" max="65535" value="20266" required></label><label>输入 CHANGE PORT ${esc(alias)}<input name="confirm" required></label><div class="form-error"></div><button class="danger" type="submit">从 ${current} 安全迁移</button></form>`,async fd=>{const job=await api('/api/nodes',{method:'POST',body:JSON.stringify({action:'port',alias,newPort:Number(fd.get('newPort')),confirm:fd.get('confirm')})});toast('SSH 端口迁移任务已启动');watchJob(job.id)})}
+function nodeRunModal(alias){modal(`远程命令：${alias}`,`<form><div class="warning-box">命令将以该节点配置的 SSH 用户权限执行；审计只记录节点和结果，不记录命令正文。</div><textarea class="editor" name="command" spellcheck="false" required>uname -a</textarea><label>输入 EXECUTE ${esc(alias)}<input name="confirm" required></label><div class="form-error"></div><button class="danger" type="submit">执行远程命令</button></form>`,async fd=>{const job=await api('/api/nodes',{method:'POST',body:JSON.stringify({action:'run',alias,command:fd.get('command'),confirm:fd.get('confirm')})});toast('远程命令任务已启动');watchJob(job.id)},true)}
+
 async function databasesView(){
   const [d,stores]=await Promise.all([api('/api/databases'),api('/api/advanced/datastores')]),dbs=d.databases||[];
   document.body.innerHTML=shell(`${pageHead('数据库','管理 MariaDB 数据库与账号；系统库默认隐藏。','<button class="primary compact" id="new-db">+ 新建数据库</button>')}
@@ -203,12 +228,13 @@ async function firewallView(){
 function firewallModal(){modal('添加防火墙规则',`<form><div class="form-grid"><label>方向<select name="direction"><option value="in">入口</option><option value="out">出口</option></select></label><label>动作<select name="ruleAction"><option value="allow">允许</option><option value="deny">拒绝</option></select></label></div><div class="form-grid"><label>端口（0 表示该协议全部端口）<input name="port" type="number" min="0" max="65535" value="0" required></label><label>协议<select name="protocol"><option>tcp</option><option>udp</option></select></label></div><label>来源 CIDR<input name="source" value="0.0.0.0/0" required></label><label>目标 CIDR<input name="destination" value="0.0.0.0/0" required></label><label>备注<input name="note" maxlength="60" placeholder="例如：只允许办公 IP 访问 443"></label><div class="form-error"></div><button class="primary" type="submit">验证并应用</button></form>`,async fd=>{const v=Object.fromEntries(fd);v.action='add';v.port=Number(v.port);await api('/api/firewall/action',{method:'POST',body:JSON.stringify(v)});toast('规则已应用');firewallView()})}
 
 async function terminalView(){
-  document.body.innerHTML=shell(`${pageHead('交互式 PTY WebShell','由 tmux 保持真实 Bash PTY，会话在浏览器断线后仍可恢复。','<button class="danger-text" id="close-pty">关闭会话</button>')}<article class="panel terminal-panel"><div class="terminal-output" id="terminal-output">正在创建 PTY 会话…</div><form id="terminal-form"><input name="command" autocomplete="off" placeholder="输入命令后按回车" required><div class="button-row"><button class="primary" type="submit">发送</button><button class="outline" type="button" id="ctrl-c">Ctrl+C</button></div></form></article>`);
-  bindShell();const created=await api('/api/pty',{method:'POST',body:JSON.stringify({action:'create',id:sessionStorage.kunPTY||''})});sessionStorage.kunPTY=created.id;
+  const remote=state.remoteNode,key=remote?'kunPTY-'+remote:'kunPTY';
+  document.body.innerHTML=shell(`${pageHead(remote?'远程节点终端：'+remote:'交互式 PTY WebShell',remote?'通过受管 Ed25519 密钥连接，tmux 保持会话并支持断线恢复。':'由 tmux 保持真实 Bash PTY，会话在浏览器断线后仍可恢复。','<button class="danger-text" id="close-pty">关闭会话</button>')}<article class="panel terminal-panel"><div class="terminal-output" id="terminal-output">正在创建 PTY 会话…</div><form id="terminal-form"><input name="command" autocomplete="off" placeholder="输入命令后按回车" required><div class="button-row"><button class="primary" type="submit">发送</button><button class="outline" type="button" id="ctrl-c">Ctrl+C</button></div></form></article>`);
+  bindShell();const created=await api('/api/pty',{method:'POST',body:JSON.stringify({action:'create',id:sessionStorage.getItem(key)||'',node:remote})});sessionStorage.setItem(key,created.id);
   const refresh=async()=>{if(state.page!=='terminal')return;try{const d=await api('/api/pty?id='+encodeURIComponent(created.id));const out=$('#terminal-output');if(out){out.textContent=d.output;out.scrollTop=out.scrollHeight}}catch{}setTimeout(refresh,1000)};refresh();
   $('#terminal-form').onsubmit=async e=>{e.preventDefault();const cmd=e.target.command.value;e.target.command.value='';await api('/api/pty',{method:'POST',body:JSON.stringify({action:'enter',id:created.id,data:cmd})})};
   $('#ctrl-c').onclick=()=>api('/api/pty',{method:'POST',body:JSON.stringify({action:'ctrl-c',id:created.id})});
-  $('#close-pty').onclick=async()=>{await api('/api/pty',{method:'POST',body:JSON.stringify({action:'close',id:created.id})});delete sessionStorage.kunPTY;toast('终端会话已关闭')};
+  $('#close-pty').onclick=async()=>{await api('/api/pty',{method:'POST',body:JSON.stringify({action:'close',id:created.id})});sessionStorage.removeItem(key);state.remoteNode='';toast('终端会话已关闭')};
 }
 
 async function systemView(){
@@ -270,12 +296,14 @@ async function watchJob(id){for(let i=0;i<240;i++){await new Promise(r=>setTimeo
 async function loadMetrics(){try{state.metrics=(await api('/api/metrics?range='+state.range)).points}catch{}}
 
 async function navigate(page){
+  if(page!=='terminal')state.remoteNode='';
   state.page=page;
   try{
     if(page==='overview'){state.overview=await api('/api/overview');await loadMetrics();return renderOverview()}
     if(page==='sites')return sitesView();
     if(page==='apps')return appsView();
     if(page==='deploy')return deploymentsView();
+    if(page==='nodes')return nodesView();
     if(page==='database')return databasesView();
     if(page==='files')return filesView();
     if(page==='firewall')return firewallView();
