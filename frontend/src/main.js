@@ -1,0 +1,244 @@
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+const state = { page: 'overview', range: '1h', overview: null, metrics: [], filePath: '', jobs: [] };
+const icons = { overview:'⌁',sites:'◫',apps:'◇',database:'⬡',files:'▱',firewall:'⛨',terminal:'⌘',security:'◉',settings:'⚙' };
+const nav = [['overview','总览'],['sites','网站'],['apps','应用商店'],['database','数据库'],['files','文件管理'],['firewall','防火墙'],['terminal','终端'],['security','安全中心'],['settings','面板设置']];
+
+async function unlockMaintenance() {
+  const password = prompt('Admin password required for this sensitive action');
+  if (!password) throw new Error('maintenance unlock cancelled');
+  const res = await fetch('/api/maintenance/unlock', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({password})
+  });
+  const data = await res.json().catch(()=>({}));
+  if (!res.ok) throw new Error(data.error || 'maintenance unlock failed');
+  return data;
+}
+
+async function api(path, options={}, retryMaintenance=true) {
+  const init = {...options};
+  if (!(init.body instanceof FormData)) init.headers = {'Content-Type':'application/json',...(init.headers||{})};
+  const res = await fetch(path, init);
+  const data = await res.json().catch(()=>({}));
+  if (res.status === 403 && data.code === 'maintenance_required' && retryMaintenance) {
+    await unlockMaintenance();
+    return api(path, options, false);
+  }
+  if (res.status === 401) { loginView(false); throw new Error('登录已过期'); }
+  if (!res.ok) throw new Error(data.error || `请求失败 (${res.status})`);
+  return data;
+}
+const esc = v => String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtDate = v => v ? new Date(v).toLocaleString() : '—';
+const formatBytes = n => { if(!n)return '0 B'; const u=['B','KB','MB','GB','TB']; const i=Math.min(Math.floor(Math.log(n)/Math.log(1024)),4); return (n/1024**i).toFixed(i?1:0)+' '+u[i] };
+const statusText = s => ({running:'运行中',stopped:'已停止',unknown:'未知',success:'成功',failed:'失败',active:'运行中'}[s]||s);
+
+function shell(content='') {
+  return `<div class="app-shell"><aside>
+    <div class="brand"><div class="brand-mark">鲲</div><div><strong>鲲面板 KunPanel</strong><span>BY TRYALLFUN</span></div></div>
+    <nav>${nav.map(([id,label])=>`<button data-page="${id}" class="${state.page===id?'active':''}"><i>${icons[id]}</i>${label}</button>`).join('')}</nav>
+    <div class="aside-foot"><span class="pulse"></span><div><strong>系统运行正常</strong><small>Debian 12 · 在线</small></div></div>
+  </aside><main><header><button class="mobile-menu">☰</button><div class="crumb">鲲面板 KunPanel <span>/</span> ${nav.find(x=>x[0]===state.page)?.[1]}</div>
+    <div class="head-actions"><button id="jobs-button" title="后台任务">⌁</button><div class="avatar">TA</div><button id="logout">退出</button></div>
+  </header><section id="content">${content}</section></main></div><div id="modal-root"></div><div id="toast-root"></div>`;
+}
+
+function bindShell() {
+  $$('[data-page]').forEach(b=>b.onclick=()=>navigate(b.dataset.page));
+  $('#logout')?.addEventListener('click',async()=>{await api('/api/logout',{method:'POST'});loginView(false)});
+  $('#jobs-button')?.addEventListener('click',jobsModal);
+  $('.mobile-menu')?.addEventListener('click',()=>document.querySelector('aside').classList.toggle('open'));
+}
+
+function toast(message, type='ok') {
+  const root=$('#toast-root'); if(!root)return;
+  const el=document.createElement('div'); el.className=`toast ${type}`; el.textContent=message; root.append(el);
+  setTimeout(()=>el.remove(),3500);
+}
+
+function modal(title, body, onSubmit, wide=false) {
+  const root=$('#modal-root');
+  root.innerHTML=`<div class="modal-backdrop"><div class="modal-card ${wide?'wide':''}"><div class="modal-head"><h2>${esc(title)}</h2><button data-close>×</button></div><div class="modal-body">${body}</div></div></div>`;
+  $('[data-close]',root).onclick=()=>root.innerHTML='';
+  $('.modal-backdrop',root).onclick=e=>{if(e.target.classList.contains('modal-backdrop'))root.innerHTML=''};
+  const form=$('form',root);
+  if(form&&onSubmit) form.onsubmit=async e=>{
+    e.preventDefault(); const btn=$('button[type=submit]',form); if(btn){btn.disabled=true;btn.dataset.old=btn.textContent;btn.textContent='处理中…'}
+    try{await onSubmit(new FormData(form));root.innerHTML=''}catch(err){$('.form-error',form).textContent=err.message;if(btn){btn.disabled=false;btn.textContent=btn.dataset.old}}
+  };
+}
+
+function loginView(setup=false) {
+  document.body.innerHTML=`<div class="login-page"><div class="login-card"><div class="brand login-brand"><div class="brand-mark">鲲</div><div><strong>鲲面板 KunPanel</strong><span>BY TRYALLFUN</span></div></div>
+  <h1>${setup?'初始化管理面板':'欢迎回来'}</h1><p>${setup?'创建唯一管理员账号，无需手机号或实名。':'登录以管理你的 Debian 服务器'}</p>
+  <form id="auth-form"><label>管理员账号<input name="username" autocomplete="username" required minlength="3" placeholder="admin"></label>
+  <label>管理员密码<input name="password" type="password" autocomplete="${setup?'new-password':'current-password'}" required placeholder="${setup?'至少 16 位，含大小写、数字、符号':'输入管理员密码'}"></label>
+  <div class="form-error"></div><button class="primary" type="submit">${setup?'创建并进入面板':'安全登录'}</button></form><footer>KunPanel by TryAllFun · 海纳万物，自由掌控</footer></div></div>`;
+  $('#auth-form').onsubmit=async e=>{e.preventDefault();const form=Object.fromEntries(new FormData(e.target));try{await api(setup?'/api/setup':'/api/login',{method:'POST',body:JSON.stringify(form)});boot()}catch(err){$('.form-error').textContent=err.message}};
+}
+
+function pageHead(title, desc, action='') { return `<div class="page-head"><div><h1>${title}</h1><p>${desc}</p></div>${action}</div>`; }
+function infoRow(k,v){return `<div class="info-row"><span>${esc(k)}</span><strong>${esc(v)}</strong></div>`}
+function metricCard(label,value,unit,cls,sub){return `<article class="metric-card"><div class="metric-top"><span>${label}</span><i class="${cls}"></i></div><div class="metric-value">${value}<small>${unit}</small></div><div class="mini-track"><b style="width:${Math.min(Number(value)||0,100)}%" class="${cls}"></b></div><small>${sub}</small></article>`}
+
+async function renderOverview() {
+  const o=state.overview||{},m=o.latest||{};
+  document.body.innerHTML=shell(`${pageHead('服务器总览','实时硬件、网络与核心服务状态。',`<div class="server-pill"><span></span>${esc(o.hostname||'—')} · ${esc(o.ip||'—')}</div>`)}
+  <div class="metrics">${metricCard('CPU 使用率',(m.cpu||0).toFixed(1),'%','cyan',`${o.cpuCores||0} 核心 · 负载 ${o.load||'—'}`)}${metricCard('内存使用率',(m.memory||0).toFixed(1),'%','violet','每 5 秒采样')}${metricCard('磁盘使用率',(m.disk||0).toFixed(1),'%','green','系统盘 /')}${metricCard('实时网络',(m.network||0).toFixed(1),' KB/s','orange','上行 + 下行')}</div>
+  <div class="grid-main"><article class="panel chart-panel"><div class="panel-title"><div><h2>资源趋势</h2><p>短周期保留精度，长周期自动聚合</p></div><div class="range">${['1h','6h','24h','7d','30d'].map(x=>`<button data-range="${x}" class="${state.range===x?'active':''}">${x}</button>`).join('')}</div></div><div class="legend"><span class="cpu">CPU</span><span class="memory">内存</span><span class="network">网络</span></div><div class="chart-wrap"><canvas id="chart"></canvas></div></article>
+  <article class="panel info-panel"><div class="panel-title"><div><h2>服务器信息</h2><p>当前节点详情</p></div></div>${infoRow('主机名',o.hostname||'—')}${infoRow('操作系统',o.os||'—')}${infoRow('架构',o.kernel||'—')}${infoRow('面板运行时间',o.uptime||'—')}${infoRow('面板版本','v0.3.0')}</article></div>
+  <div class="grid-bottom"><article class="panel"><div class="panel-title"><div><h2>核心服务</h2><p>可直接启停与重启</p></div><button class="link" data-page="apps">应用商店 →</button></div><div id="services" class="services"></div></article>
+  <article class="panel"><div class="panel-title"><div><h2>最近任务</h2><p>安装与系统操作</p></div><button class="link" id="view-jobs">全部任务 →</button></div><div id="recent-jobs" class="compact-list">暂无任务</div></article></div>`);
+  bindShell(); drawChart();
+  $$('[data-range]').forEach(b=>b.onclick=async()=>{state.range=b.dataset.range;await loadMetrics();renderOverview()});
+  $('#view-jobs').onclick=jobsModal;
+  const [services,jobs]=await Promise.all([api('/api/services'),api('/api/jobs')]);
+  $('#services').innerHTML=services.slice(0,4).map(serviceCard).join('');
+  $('#recent-jobs').innerHTML=jobs.length?jobs.slice(0,4).map(j=>`<div class="compact-row"><span>${esc(j.name)}</span><b class="${j.status}">${statusText(j.status)}</b></div>`).join(''):'暂无后台任务';
+  bindServiceButtons();
+}
+
+function serviceCard(s){return `<div class="service"><div class="service-icon">${esc(s.label[0])}</div><div><strong>${esc(s.label)}</strong><small>${esc(s.port)} · ${s.installed?'已安装':'未安装'}</small></div><span class="${s.status}">${statusText(s.status)}</span>${s.installed?`<button class="tiny" data-service="${esc(s.name)}" data-action="${s.status==='running'?'restart':'start'}">${s.status==='running'?'重启':'启动'}</button>`:''}</div>`}
+function bindServiceButtons(){ $$('[data-service]').forEach(b=>b.onclick=async()=>{if(!confirm(`确认${b.textContent} ${b.dataset.service}？`))return;try{await api('/api/services/action',{method:'POST',body:JSON.stringify({service:b.dataset.service,action:b.dataset.action})});toast('服务操作成功');await navigate(state.page)}catch(e){toast(e.message,'error')}}) }
+
+function drawChart(){const canvas=$('#chart');if(!canvas)return;const rect=canvas.getBoundingClientRect(),dpr=devicePixelRatio||1;canvas.width=rect.width*dpr;canvas.height=rect.height*dpr;const c=canvas.getContext('2d');c.scale(dpr,dpr);const w=rect.width,h=rect.height;c.strokeStyle='rgba(148,163,184,.12)';for(let i=1;i<5;i++){let y=(h-20)*i/5;c.beginPath();c.moveTo(0,y);c.lineTo(w,y);c.stroke()}const pts=state.metrics;if(pts.length<2)return;[['cpu','#21d4fd'],['memory','#8b7cff'],['network','#26d99a']].forEach(([key,color])=>{c.beginPath();pts.forEach((p,i)=>{let x=i/(pts.length-1)*w,y=h-20-(Math.min(p[key],100)/100)*(h-40);i?c.lineTo(x,y):c.moveTo(x,y)});c.strokeStyle=color;c.lineWidth=2;c.stroke()})}
+
+async function sitesView(){
+  const sites=await api('/api/sites');
+  document.body.innerHTML=shell(`${pageHead('网站管理','创建静态、PHP、WordPress 或反向代理站点；编辑会先通过 Nginx 检查。','<button class="primary compact" id="new-site">+ 新建网站</button>')}
+  <article class="panel"><table><thead><tr><th>域名</th><th>类型</th><th>HTTPS</th><th>状态</th><th>来源</th><th>操作</th></tr></thead><tbody>${sites.map(s=>`<tr class="clickable-row" data-site-open="${esc(s.file)}"><td>${esc(s.domains.join(', ')||s.file)}</td><td>${esc(s.type)}</td><td>${s.tls?'<span class="safe">已启用</span>':'HTTP'}</td><td>${s.enabled?'<span class="safe">启用</span>':'<span class="danger-badge">暂停</span>'}</td><td>${s.managed?'面板管理':'现有配置'}</td><td class="actions"><button class="tiny" data-site-detail="${esc(s.file)}">详情</button> <button class="tiny" data-edit-site="${esc(s.file)}">编辑</button> ${s.enabled?`<button class="danger-text" data-disable-site="${esc(s.file)}">暂停</button>`:`<button class="tiny" data-enable-site="${esc(s.file)}">启用</button>`} ${s.managed?`<button class="danger-text" data-delete-site="${esc(s.file)}">删除</button>`:''}</td></tr>`).join('')||'<tr><td colspan="6">暂无网站</td></tr>'}</tbody></table></article>`);
+  bindShell(); $('#new-site').onclick=siteModal;
+  $$('[data-site-open]').forEach(r=>r.onclick=e=>{if(e.target.closest('button'))return;siteDetailModal(r.dataset.siteOpen)});
+  $$('[data-site-detail]').forEach(b=>b.onclick=()=>siteDetailModal(b.dataset.siteDetail));
+  $$('[data-edit-site]').forEach(b=>b.onclick=()=>siteEditModal(b.dataset.editSite));
+  $$('[data-disable-site]').forEach(b=>b.onclick=async()=>{if(!confirm('确认暂停该站点？'))return;await api('/api/sites/action',{method:'POST',body:JSON.stringify({action:'disable',file:b.dataset.disableSite})});toast('站点已暂停');sitesView()});
+  $$('[data-enable-site]').forEach(b=>b.onclick=async()=>{await api('/api/sites/action',{method:'POST',body:JSON.stringify({action:'enable',file:b.dataset.enableSite})});toast('站点已启用');sitesView()});
+  $$('[data-delete-site]').forEach(b=>b.onclick=()=>{const file=b.dataset.deleteSite;modal('删除网站配置',`<form><p>只删除 Nginx 配置，网站文件保留并自动备份配置。</p><label>输入配置文件名确认<input name="confirm" required placeholder="${esc(file)}"></label><div class="form-error"></div><button class="danger" type="submit">删除配置</button></form>`,async fd=>{if(fd.get('confirm')!==file)throw new Error('确认文本不一致');await api('/api/sites/action',{method:'POST',body:JSON.stringify({action:'delete',file})});toast('网站配置已删除');sitesView()})});
+}
+async function siteDetailModal(file){const s=await api('/api/sites/detail?file='+encodeURIComponent(file));modal('网站详情：'+file,`<div class="detail-grid">${infoRow('域名',(s.domains||[]).join(', ')||'-')}${infoRow('类型',s.type)}${infoRow('状态',s.enabled?'启用':'暂停')}${infoRow('根目录',s.root||'-')}${infoRow('上游',s.upstream||'-')}</div><hr><pre class="config-preview">${esc(s.content)}</pre><div class="button-row"><button class="outline" id="detail-edit-site">编辑配置</button></div>`,null,true);$('#detail-edit-site').onclick=()=>siteEditModal(file)}
+async function siteEditModal(file){const s=await api('/api/sites/detail?file='+encodeURIComponent(file));modal('编辑 Nginx 配置：'+file,`<form><textarea class="editor" name="content" spellcheck="false">${esc(s.content)}</textarea><div class="form-error"></div><button class="primary" type="submit">检查配置并保存</button></form>`,async fd=>{await api('/api/sites/action',{method:'POST',body:JSON.stringify({action:'edit',file,content:fd.get('content')})});toast('网站配置已保存');sitesView()},true)}
+function siteModal(){modal('新建网站',`<form><div class="form-grid"><label>域名<input name="domain" required placeholder="example.com"></label><label>网站类型<select name="type" id="site-type"><option value="static">静态网站</option><option value="php">PHP / 动态站点</option><option value="wordpress">WordPress 一键建站</option><option value="proxy">反向代理</option></select></label></div><label>网站根目录（静态/PHP，可留空）<input name="root" placeholder="/home/wwwroot/example.com/public"></label><label>上游地址（反向代理）<input name="upstream" placeholder="http://127.0.0.1:3000"></label><label>源站 IP（反代本机 DNS 覆盖，可选）<input name="originIP" placeholder="1.2.3.4"></label><div class="form-grid"><label>WordPress 管理员邮箱<input name="email" type="email" placeholder="admin@example.com"></label><label>WordPress 站点标题<input name="title" value="My WordPress"></label></div><label class="check"><input name="tls" type="checkbox"> 使用服务器已有证书并强制 HTTPS</label><div class="button-row"><button class="outline" type="button" id="cf-settings">Cloudflare API / 自动橙云</button></div><div class="form-error"></div><button class="primary" type="submit">检查配置并创建</button></form>`,async fd=>{const v=Object.fromEntries(fd);if(v.type==='wordpress'){if(!v.email)throw new Error('WordPress 需要管理员邮箱');const r=await api('/api/advanced/wordpress',{method:'POST',body:JSON.stringify({domain:v.domain,email:v.email,title:v.title||'My WordPress'})});toast('WordPress 编排任务已启动');watchJob(r.job.id);return}v.action='create';v.tls=fd.has('tls');await api('/api/sites/action',{method:'POST',body:JSON.stringify(v)});toast('网站创建成功');sitesView()});setTimeout(()=>{$('#cf-settings')?.addEventListener('click',cloudflareModal)})}
+async function cloudflareModal(){const c=await api('/api/advanced/cloudflare');modal('Cloudflare API / 自动橙云',`<form><div class="warning-box">API Key/Token 只保存到面板配置文件，读取时会脱敏。自动橙云监控器会使用这里的阈值。</div><div class="form-grid"><label>Cloudflare 邮箱<input name="email" value="${esc(c.email||'')}" placeholder="you@example.com"></label><label>Zone ID<input name="zoneID" value="${esc(c.zoneID||'')}"></label></div><label>API Token（推荐）<input name="apiToken" type="password" placeholder="${esc(c.apiTokenMasked||'留空表示不修改')}"></label><label>Global API Key（兼容）<input name="apiKey" type="password" placeholder="${esc(c.apiKeyMasked||'留空表示不修改')}"></label><label class="check"><input name="autoOrangeCloud" type="checkbox" ${c.autoOrangeCloud?'checked':''}> 达到阈值后自动切换橙云</label><div class="form-grid"><label>流量阈值 GB<input name="trafficGB" type="number" min="0" step="0.1" value="${esc(c.trafficGB||0)}"></label><label>CPU 阈值 %<input name="cpuPercent" type="number" min="0" max="100" step="1" value="${esc(c.cpuPercent||0)}"></label></div><label>持续时间（分钟）<input name="sustainMinutes" type="number" min="0" max="1440" value="${esc(c.sustainMinutes||0)}"></label><div class="form-error"></div><button class="primary" type="submit">保存 Cloudflare 配置</button></form>`,async fd=>{await api('/api/advanced/cloudflare',{method:'POST',body:JSON.stringify({email:fd.get('email'),zoneID:fd.get('zoneID'),apiToken:fd.get('apiToken'),apiKey:fd.get('apiKey'),autoOrangeCloud:fd.has('autoOrangeCloud'),trafficGB:Number(fd.get('trafficGB')||0),cpuPercent:Number(fd.get('cpuPercent')||0),sustainMinutes:Number(fd.get('sustainMinutes')||0)})});toast('Cloudflare 配置已保存')},true)}
+
+async function appsView(){
+  const [apps,services]=await Promise.all([api('/api/apps'),api('/api/services')]);
+  document.body.innerHTML=shell(`${pageHead('应用商店','使用 Debian 官方软件源安装，应用详情、服务状态和配置入口可查看。','<button class="outline" id="manage-services">管理服务</button>')}<div class="apps-grid">${apps.map(a=>`<article class="app-card clickable-card" data-app-card="${esc(a.id)}"><div class="app-logo">${esc(a.name[0])}</div><div class="verified">✓ 已验证</div><h2>${esc(a.name)}</h2><p>${esc(a.desc)}</p><span>${esc(a.category)}</span><button data-app="${esc(a.id)}" class="${a.installed?'installed':'outline'}" ${a.installed?'disabled':''}>${a.installed?'已安装':'安装'}</button></article>`).join('')}</div>`);
+  bindShell();
+  $$('[data-app-card]').forEach(card=>card.onclick=e=>{if(e.target.closest('button'))return;appDetailModal(card.dataset.appCard)});
+  $$('[data-app]').forEach(b=>b.onclick=async e=>{e.stopPropagation();await installApp(b.dataset.app)});
+  $('#manage-services').onclick=()=>{modal('系统服务',`<div class="services modal-services">${services.map(serviceCard).join('')}</div>`,null,true);setTimeout(bindServiceButtons)};
+}
+async function installApp(id){if(id==='wordpress')return wordpressModal();if(!confirm('安装软件会修改系统软件包，确认继续？'))return;try{const j=await api('/api/apps/action',{method:'POST',body:JSON.stringify({id,action:'install'})});toast('安装任务已启动');watchJob(j.id)}catch(e){toast(e.message,'error')}}
+async function appDetailModal(id){const a=await api('/api/apps/detail?id='+encodeURIComponent(id));modal('应用详情：'+a.name,`<div class="detail-grid">${infoRow('分类',a.category)}${infoRow('状态',a.installed?'已安装':(a.orchestrated?'编排式应用':'未安装'))}${infoRow('说明',a.desc)}</div><hr><div class="panel-title"><div><h2>关联服务</h2><p>可直接查看状态并启动/重启</p></div></div><div class="services modal-services">${(a.services||[]).map(serviceCard).join('')||'<p class="muted">暂无关联服务</p>'}</div><hr><div class="tag-list">${(a.checks||[]).map(x=>`<span>${esc(x)}</span>`).join('')}</div><div class="compact-list">${(a.config||[]).map(x=>`<div class="compact-row"><span><strong>${esc(x.label||x.name)}</strong><small>${esc(x.value||x.description||'')}</small></span></div>`).join('')||''}</div><div class="button-row modal-actions">${a.installed?'':`<button class="primary" id="install-current-app">${a.orchestrated?'打开配置':'安装'}</button>`}<button class="outline" id="app-jobs">后台任务</button></div>`,null,true);setTimeout(bindServiceButtons);$('#install-current-app')?.addEventListener('click',()=>installApp(id));$('#app-jobs').onclick=jobsModal}
+function wordpressModal(){modal('WordPress 一键建站',`<form><div class="warning-box">将创建 MariaDB 数据库、下载 WordPress、完成初始化并创建 Nginx 网站。域名需已解析到本机。</div><label>域名<input name="domain" required placeholder="blog.example.com"></label><label>管理员邮箱<input name="email" type="email" required></label><label>站点标题<input name="title" value="My WordPress"></label><div class="form-error"></div><button class="primary" type="submit">开始编排</button></form>`,async fd=>{const r=await api('/api/advanced/wordpress',{method:'POST',body:JSON.stringify(Object.fromEntries(fd))});modal('请立即保存 WordPress 凭据',`<div class="warning-box">密码只显示这一次。</div>${infoRow('WordPress 管理员',r.adminUser)}${infoRow('WordPress 密码',r.adminPassword)}${infoRow('数据库',r.database)}${infoRow('数据库用户',r.user)}${infoRow('数据库密码',r.password)}${infoRow('目录',r.root)}<button class="primary" id="wp-job">查看部署任务</button>`,null);$('#wp-job').onclick=jobsModal;watchJob(r.job.id)})}
+
+async function databasesView(){
+  const [d,stores]=await Promise.all([api('/api/databases'),api('/api/advanced/datastores')]),dbs=d.databases||[];
+  document.body.innerHTML=shell(`${pageHead('数据库','管理 MariaDB 数据库与账号；系统库默认隐藏。','<button class="primary compact" id="new-db">+ 新建数据库</button>')}
+  <div class="metrics engine-cards">${d.engines.map(e=>`<article class="metric-card"><div class="metric-top"><span>${esc(e.name)}</span><i class="${e.status==='running'?'green':'orange'}"></i></div><div class="engine-state">${e.installed?statusText(e.status):'未安装'}</div><small>${e.installed?'系统服务已发现':'可从应用商店安装'}</small></article>`).join('')}</div>
+  <article class="panel"><div class="panel-title"><div><h2>MariaDB 数据库</h2><p>${dbs.length} 个用户数据库</p></div></div><table><thead><tr><th>名称</th><th>字符集</th><th>操作</th></tr></thead><tbody>${dbs.map(n=>`<tr class="clickable-row" data-db-open="${esc(n)}"><td>${esc(n)}</td><td>utf8mb4</td><td><button class="tiny" data-db-detail="${esc(n)}">详情</button> <button class="danger-text" data-drop-db="${esc(n)}">删除</button></td></tr>`).join('')||'<tr><td colspan="3">暂无用户数据库</td></tr>'}</tbody></table></article>
+  <div class="grid-bottom datastore-grid"><article class="panel"><div class="panel-title"><div><h2>PostgreSQL</h2><p>${stores.postgres.installed?statusText(stores.postgres.status):'未安装'}</p></div>${stores.postgres.installed?'<button class="outline" id="pg-role">新建角色</button>':'<button class="link" data-page="apps">前往安装</button>'}</div><div class="tag-list">${(stores.postgres.roles||[]).map(x=>`<span>${esc(x)}</span>`).join('')||'暂无自定义角色'}</div></article>
+  <article class="panel"><div class="panel-title"><div><h2>Redis</h2><p>${stores.redis.installed?statusText(stores.redis.status):'未安装'}</p></div></div><div class="tag-list">${(stores.redis.databases||[]).map(x=>`<button class="tag danger-text" data-flush-redis="${esc(x.name)}">${esc(x.name)} · ${esc(x.keys)} keys</button>`).join('')||'暂无键空间数据'}</div></article></div>`);
+  bindShell(); $('#new-db').onclick=dbModal;
+  $$('[data-db-open]').forEach(r=>r.onclick=e=>{if(e.target.closest('button'))return;dbDetailModal(r.dataset.dbOpen)});
+  $$('[data-db-detail]').forEach(b=>b.onclick=()=>dbDetailModal(b.dataset.dbDetail));
+  $$('[data-drop-db]').forEach(b=>b.onclick=()=>{const name=b.dataset.dropDb;modal('删除数据库',`<form><p class="warning-box">此操作不可撤销，请先自行备份。</p><label>输入数据库名确认<input name="confirm" required placeholder="${esc(name)}"></label><div class="form-error"></div><button class="danger" type="submit">永久删除</button></form>`,async fd=>{await api('/api/databases/action',{method:'POST',body:JSON.stringify({action:'drop',engine:'mariadb',name,confirm:fd.get('confirm')})});toast('数据库已删除');databasesView()})});
+  $('#pg-role')?.addEventListener('click',()=>modal('新建 PostgreSQL 角色',`<form><label>角色名<input name="name" required></label><label>密码<input name="password" type="password" minlength="12" required></label><div class="form-error"></div><button class="primary" type="submit">创建角色</button></form>`,async fd=>{await api('/api/advanced/datastores',{method:'POST',body:JSON.stringify({engine:'postgres',action:'create-role',...Object.fromEntries(fd)})});toast('PostgreSQL 角色已创建');databasesView()}));
+  $$('[data-flush-redis]').forEach(b=>b.onclick=()=>{const name=b.dataset.flushRedis;modal('清空 Redis 数据库',`<form><div class="warning-box">此操作不可恢复。</div><label>输入 FLUSH ${esc(name)} 确认<input name="confirm" required></label><div class="form-error"></div><button class="danger" type="submit">清空数据库</button></form>`,async fd=>{await api('/api/advanced/datastores',{method:'POST',body:JSON.stringify({engine:'redis',action:'flush-db',name,confirm:fd.get('confirm')})});toast('Redis 数据库已清空');databasesView()})});
+}
+function dbModal(){modal('新建 MariaDB 数据库',`<form><label>数据库名<input name="name" required pattern="[A-Za-z][A-Za-z0-9_]{0,62}"></label><label>数据库用户<input name="user" placeholder="默认与数据库名相同"></label><label>数据库密码<input name="password" type="password" required minlength="12"></label><div class="form-error"></div><button class="primary" type="submit">创建数据库和用户</button></form>`,async fd=>{await api('/api/databases/action',{method:'POST',body:JSON.stringify({action:'create',engine:'mariadb',...Object.fromEntries(fd)})});toast('数据库创建成功');databasesView()})}
+async function dbDetailModal(name, table=''){const d=await api('/api/databases/detail?name='+encodeURIComponent(name)+(table?'&table='+encodeURIComponent(table):''));const tables=d.tables||[];const selected=table||tables[0]?.name||'';const detail=selected&&selected!==table?await api('/api/databases/detail?name='+encodeURIComponent(name)+'&table='+encodeURIComponent(selected)):d;const rows=selected?await api('/api/databases/rows?name='+encodeURIComponent(name)+'&table='+encodeURIComponent(selected)+'&limit=100'):{columns:[],rows:[]};modal('数据库详情：'+name,`<div class="db-browser"><aside class="db-tables">${tables.map(t=>`<button class="${t.name===selected?'active':''}" data-db-table="${esc(t.name)}">${esc(t.name)}<small>${esc(t.rows)} rows</small></button>`).join('')||'暂无表'}</aside><section><div class="panel-title"><div><h2>${esc(selected||'未选择表')}</h2><p>字段结构与前 100 行数据</p></div><button class="outline" id="sql-console">SQL 控制台</button></div><table><thead><tr><th>字段</th><th>类型</th><th>NULL</th><th>键</th><th>默认</th><th>附加</th></tr></thead><tbody>${(detail.columns||[]).map(c=>`<tr><td>${esc(c.name)}</td><td>${esc(c.type)}</td><td>${esc(c.nullable)}</td><td>${esc(c.key)}</td><td>${esc(c.default)}</td><td>${esc(c.extra)}</td></tr>`).join('')||'<tr><td colspan="6">暂无字段</td></tr>'}</tbody></table><hr>${rowsTable(rows)}</section></div>`,null,true);$$('[data-db-table]').forEach(b=>b.onclick=()=>dbDetailModal(name,b.dataset.dbTable));$('#sql-console').onclick=()=>sqlConsoleModal(name)}
+function rowsTable(r){const cols=r.columns||[];return `<div class="table-scroll"><table><thead><tr>${cols.map(c=>`<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>${(r.rows||[]).map(row=>`<tr>${cols.map(c=>`<td>${esc(row[c])}</td>`).join('')}</tr>`).join('')||`<tr><td colspan="${Math.max(cols.length,1)}">暂无数据</td></tr>`}</tbody></table></div>`}
+function sqlConsoleModal(name){modal('SQL 控制台：'+name,`<form id="sql-form"><div class="warning-box">这里可以执行 SELECT/ALTER/UPDATE/DELETE 等 SQL。执行前会要求维护解锁，请先确认已备份关键数据。</div><textarea class="editor sql-editor" name="sql" spellcheck="false">SELECT * FROM table_name LIMIT 100;</textarea><div class="form-error"></div><button class="primary" type="submit">执行 SQL</button></form><div id="sql-result"></div>`,null,true);$('#sql-form').onsubmit=async e=>{e.preventDefault();const form=e.target,btn=$('button[type=submit]',form);btn.disabled=true;try{const r=await api('/api/databases/query',{method:'POST',body:JSON.stringify({name,sql:form.sql.value})});$('#sql-result').innerHTML=rowsTable(r)||`<pre>${esc(r.output||'OK')}</pre>`;toast('SQL 已执行')}catch(err){$('.form-error',form).textContent=err.message}finally{btn.disabled=false}}}
+
+async function filesView(path=state.filePath){
+  const f=await api('/api/files'+(path?'?path='+encodeURIComponent(path):''));state.filePath=f.path;
+  document.body.innerHTML=shell(`${pageHead('文件管理',`安全根目录：${esc(f.root)}`,'<div class="button-row"><button class="outline" id="mkdir">新建目录</button><button class="primary compact" id="upload">上传文件</button></div>')}
+  <article class="panel"><div class="pathbar"><button id="up-dir">↑</button> ▱ ${esc(f.path)}</div><table><thead><tr><th>名称</th><th>权限</th><th>大小</th><th>修改时间</th><th>操作</th></tr></thead><tbody>${f.items.map(x=>`<tr><td><button class="file-link" data-open="${esc(x.path)}" data-dir="${x.dir}"><span class="file-icon">${x.dir?'▰':'▱'}</span>${esc(x.name)}</button></td><td>${esc(x.mode)}</td><td>${x.dir?'—':formatBytes(x.size)}</td><td>${fmtDate(x.modified)}</td><td><button class="tiny" data-archive="${esc(x.path)}">压缩</button> ${!x.dir&&/\.(zip|tar\.gz|tgz)$/.test(x.name)?`<button class="tiny" data-extract="${esc(x.path)}">解压</button>`:''} ${!x.dir?`<a class="tiny download-link" href="/api/files/download?path=${encodeURIComponent(x.path)}">下载</a>`:''} <button class="tiny" data-rename="${esc(x.path)}">重命名</button> <button class="danger-text" data-trash="${esc(x.path)}">回收站</button></td></tr>`).join('')}</tbody></table></article><input id="file-input" type="file" hidden>`);
+  bindShell();
+  $('#up-dir').onclick=()=>{if(f.path!==f.root)filesView(f.path.replace(/[\\/][^\\/]+$/,''))};
+  $$('[data-open]').forEach(b=>b.onclick=()=>b.dataset.dir==='true'?filesView(b.dataset.open):editFile(b.dataset.open));
+  $('#mkdir').onclick=()=>modal('新建目录',`<form><label>目录名<input name="name" required></label><div class="form-error"></div><button class="primary" type="submit">创建</button></form>`,async fd=>{await api('/api/files/action',{method:'POST',body:JSON.stringify({action:'mkdir',path:f.path,name:fd.get('name')})});toast('目录已创建');filesView(f.path)});
+  $('#upload').onclick=()=>$('#file-input').click();$('#file-input').onchange=async e=>{const body=new FormData();body.append('path',f.path);body.append('file',e.target.files[0]);try{await api('/api/files',{method:'POST',body});toast('上传完成');filesView(f.path)}catch(err){toast(err.message,'error')}};
+  $$('[data-rename]').forEach(b=>b.onclick=()=>modal('重命名',`<form><label>新名称<input name="name" required></label><div class="form-error"></div><button class="primary" type="submit">保存</button></form>`,async fd=>{await api('/api/files/action',{method:'POST',body:JSON.stringify({action:'rename',path:b.dataset.rename,name:fd.get('name')})});toast('重命名成功');filesView(f.path)}));
+  $$('[data-archive]').forEach(b=>b.onclick=()=>modal('创建压缩包',`<form><label>压缩包名称<input name="name" value="${esc(b.dataset.archive.split(/[\\/]/).pop())}" required></label><label>格式<select name="format"><option value="tar.gz">tar.gz</option><option value="zip">zip</option></select></label><div class="form-error"></div><button class="primary" type="submit">压缩</button></form>`,async fd=>{await api('/api/files/action',{method:'POST',body:JSON.stringify({action:'archive',path:b.dataset.archive,...Object.fromEntries(fd)})});toast('压缩完成');filesView(f.path)}));
+  $$('[data-extract]').forEach(b=>b.onclick=async()=>{if(!confirm('解压到当前目录并跳过同名文件？'))return;try{await api('/api/files/action',{method:'POST',body:JSON.stringify({action:'extract',path:b.dataset.extract})});toast('解压完成');filesView(f.path)}catch(e){toast(e.message,'error')}});
+  $$('[data-trash]').forEach(b=>{const name=b.dataset.trash.split(/[\\/]/).pop();b.onclick=()=>modal('移入回收站',`<form><p>文件会移入安全根目录下的 .kun-trash。</p><label>输入名称确认<input name="confirm" required placeholder="${esc(name)}"></label><div class="form-error"></div><button class="danger" type="submit">移入回收站</button></form>`,async fd=>{await api('/api/files/action',{method:'POST',body:JSON.stringify({action:'trash',path:b.dataset.trash,confirm:fd.get('confirm')})});toast('已移入回收站');filesView(f.path)})});
+}
+async function editFile(path){try{const d=await api('/api/files/content?path='+encodeURIComponent(path));modal('编辑 '+path.split(/[\\/]/).pop(),`<form><textarea class="editor" name="content" spellcheck="false">${esc(d.content)}</textarea><div class="form-error"></div><button class="primary" type="submit">保存并自动备份原文件</button></form>`,async fd=>{await api('/api/files/content?path='+encodeURIComponent(path),{method:'PUT',body:JSON.stringify({content:fd.get('content')})});toast('文件已保存')},true)}catch(e){toast(e.message,'error')}}
+
+async function firewallView(){
+  const fw=await api('/api/firewall');
+  document.body.innerHTML=shell(`${pageHead('防火墙','独立 nftables 表采用默认拒绝策略；回环、已建立连接和 ICMP 自动放行。',`<div class="button-row">${!fw.installed?'<button class="outline" data-page="apps">安装 nftables</button>':!fw.enabled?'<button class="outline" id="enable-fw">启用默认拒绝</button>':''}<button class="primary compact" id="add-rule" ${fw.installed?'':'disabled'}>+ 添加规则</button></div>`)}
+  <article class="panel"><div class="panel-title"><div><h2>详细规则</h2><p>${fw.backend} · ${fw.installed?(fw.enabled?'规则已加载':'尚未加载'):'未安装'} · 规则按列表顺序生效</p></div><span class="${fw.enabled?'safe':'score-pill'}">${fw.enabled?'运行中':'未启用'}</span></div><table><thead><tr><th>方向</th><th>端口</th><th>协议</th><th>来源</th><th>目标</th><th>动作</th><th>备注</th><th>操作</th></tr></thead><tbody>${fw.rules.map(r=>`<tr><td>${(r.direction||'in')==='out'?'出口':'入口'}</td><td>${r.port?esc(r.port):'全部'}</td><td>${esc((r.protocol||'').toUpperCase())}</td><td>${esc(r.source||'0.0.0.0/0')}</td><td>${esc(r.destination||'0.0.0.0/0')}</td><td><span class="${r.action==='allow'?'safe':'danger-badge'}">${r.action==='allow'?'允许':'拒绝'}</span></td><td>${esc(r.note)}</td><td>${fw.enabled?`<button class="danger-text" data-del-rule="${esc(r.id)}">删除</button>`:'—'}</td></tr>`).join('')}</tbody></table></article>`);
+  bindShell();
+  $('#enable-fw')?.addEventListener('click',async()=>{try{await api('/api/firewall/action',{method:'POST',body:JSON.stringify({action:'enable'})});toast('防火墙规则表已启用');firewallView()}catch(e){toast(e.message,'error')}});
+  $('#add-rule')?.addEventListener('click',firewallModal);
+  $$('[data-del-rule]').forEach(b=>b.onclick=async()=>{if(!confirm('确认删除这条规则？'))return;try{await api('/api/firewall/action',{method:'POST',body:JSON.stringify({action:'delete',id:b.dataset.delRule})});toast('规则已删除');firewallView()}catch(e){toast(e.message,'error')}});
+}
+function firewallModal(){modal('添加防火墙规则',`<form><div class="form-grid"><label>方向<select name="direction"><option value="in">入口</option><option value="out">出口</option></select></label><label>动作<select name="ruleAction"><option value="allow">允许</option><option value="deny">拒绝</option></select></label></div><div class="form-grid"><label>端口（0 表示该协议全部端口）<input name="port" type="number" min="0" max="65535" value="0" required></label><label>协议<select name="protocol"><option>tcp</option><option>udp</option></select></label></div><label>来源 CIDR<input name="source" value="0.0.0.0/0" required></label><label>目标 CIDR<input name="destination" value="0.0.0.0/0" required></label><label>备注<input name="note" maxlength="60" placeholder="例如：只允许办公 IP 访问 443"></label><div class="form-error"></div><button class="primary" type="submit">验证并应用</button></form>`,async fd=>{const v=Object.fromEntries(fd);v.action='add';v.port=Number(v.port);await api('/api/firewall/action',{method:'POST',body:JSON.stringify(v)});toast('规则已应用');firewallView()})}
+
+async function terminalView(){
+  document.body.innerHTML=shell(`${pageHead('交互式 PTY WebShell','由 tmux 保持真实 Bash PTY，会话在浏览器断线后仍可恢复。','<button class="danger-text" id="close-pty">关闭会话</button>')}<article class="panel terminal-panel"><div class="terminal-output" id="terminal-output">正在创建 PTY 会话…</div><form id="terminal-form"><input name="command" autocomplete="off" placeholder="输入命令后按回车" required><div class="button-row"><button class="primary" type="submit">发送</button><button class="outline" type="button" id="ctrl-c">Ctrl+C</button></div></form></article>`);
+  bindShell();const created=await api('/api/pty',{method:'POST',body:JSON.stringify({action:'create',id:sessionStorage.kunPTY||''})});sessionStorage.kunPTY=created.id;
+  const refresh=async()=>{if(state.page!=='terminal')return;try{const d=await api('/api/pty?id='+encodeURIComponent(created.id));const out=$('#terminal-output');if(out){out.textContent=d.output;out.scrollTop=out.scrollHeight}}catch{}setTimeout(refresh,1000)};refresh();
+  $('#terminal-form').onsubmit=async e=>{e.preventDefault();const cmd=e.target.command.value;e.target.command.value='';await api('/api/pty',{method:'POST',body:JSON.stringify({action:'enter',id:created.id,data:cmd})})};
+  $('#ctrl-c').onclick=()=>api('/api/pty',{method:'POST',body:JSON.stringify({action:'ctrl-c',id:created.id})});
+  $('#close-pty').onclick=async()=>{await api('/api/pty',{method:'POST',body:JSON.stringify({action:'close',id:created.id})});delete sessionStorage.kunPTY;toast('终端会话已关闭')};
+}
+
+async function securityView(){
+  const s=await api('/api/security'),ssh=s.ssh||{};
+  document.body.innerHTML=shell(`${pageHead('安全中心','SSH、TLS、管理员密码与完整操作审计。',`<span class="score-pill">安全评分 ${s.score}</span>`)}
+  <div class="settings-grid"><article class="panel setting-card"><i>⌘</i><h2>SSH 安全</h2><p>端口 ${s.sshPort} · 密码登录${ssh.passwordAuth?'已开启':'已关闭'} · Root 登录${ssh.rootLogin?'已开启':'仅密钥'}</p><button class="outline" id="ssh-settings">管理 SSH</button></article>
+  <article class="panel setting-card"><i>◈</i><h2>TLS / Let's Encrypt</h2><p>已发现 ${s.tls?.length||0} 张证书，可自动签发与续期。</p><div class="button-row"><button class="outline" id="cert-list">查看证书</button><button class="outline" id="issue-cert">签发证书</button></div></article>
+  <article class="panel setting-card"><i>●</i><h2>Root 密码</h2><p>通过系统 chpasswd 安全更新，不写入日志。</p><button class="outline" id="root-password">修改密码</button></article>
+  <article class="panel setting-card"><i>≡</i><h2>操作审计</h2><p>记录系统配置、文件、服务、安装及终端操作。</p><button class="outline" id="audit-log">查看日志</button></article></div>`);
+  bindShell();$('#ssh-settings').onclick=()=>sshModal(s);$('#root-password').onclick=rootPasswordModal;$('#audit-log').onclick=auditModal;
+  $('#cert-list').onclick=()=>modal('TLS 证书',`<div class="cert-list">${(s.tls||[]).map(c=>`<article><strong>${esc(c.path)}</strong><pre>${esc(c.detail)}</pre></article>`).join('')||'未发现证书'}</div>`,null,true);
+  $('#issue-cert').onclick=certificateModal;
+}
+async function certificateModal(){const c=await api('/api/advanced/certificates');if(!c.certbot){return modal('安装 Certbot',`<form><p>服务器尚未安装 Certbot，将从 Debian 官方源安装。</p><div class="form-error"></div><button class="primary" type="submit">安装 Certbot</button></form>`,async()=>{const j=await api('/api/advanced/certificates',{method:'POST',body:JSON.stringify({action:'install-certbot'})});watchJob(j.id)})}modal('签发 Let’s Encrypt 证书',`<form><label>域名<input name="domain" required></label><label>邮箱<input name="email" type="email" required></label><label>WebRoot（可留空）<input name="root"></label><div class="form-error"></div><button class="primary" type="submit">签发并启用自动续期</button></form>`,async fd=>{const j=await api('/api/advanced/certificates',{method:'POST',body:JSON.stringify({action:'issue',...Object.fromEntries(fd)})});toast('证书任务已启动');watchJob(j.id)})}
+function sshModal(s){modal('SSH 安全设置',`<form><div class="warning-box">修改端口前，请确认云厂商安全组允许新端口。配置会先通过 sshd -t 检查再重载。</div><label>SSH 端口<input name="port" type="number" min="1" max="65535" value="${s.sshPort}" required></label><label class="check"><input name="passwordAuth" type="checkbox" ${s.ssh?.passwordAuth?'checked':''}> 允许密码登录</label><label class="check"><input name="rootLogin" type="checkbox" ${s.ssh?.rootLogin?'checked':''}> 允许 Root 密码登录</label><label>输入 APPLY SSH 确认<input name="confirm" required></label><div class="form-error"></div><button class="danger" type="submit">验证并应用 SSH 配置</button></form>`,async fd=>{await api('/api/security/action',{method:'POST',body:JSON.stringify({action:'ssh',port:Number(fd.get('port')),passwordAuth:fd.has('passwordAuth'),rootLogin:fd.has('rootLogin'),confirm:fd.get('confirm')})});toast('SSH 配置已应用');securityView()})}
+function rootPasswordModal(){modal('修改 Root 密码',`<form><div class="warning-box">密码不会保存到面板配置或审计日志。</div><label>新密码<input name="rootPassword" type="password" minlength="16" required></label><label>输入 CHANGE ROOT PASSWORD 确认<input name="confirm" required></label><div class="form-error"></div><button class="danger" type="submit">修改 Root 密码</button></form>`,async fd=>{await api('/api/security/action',{method:'POST',body:JSON.stringify({action:'root-password',rootPassword:fd.get('rootPassword'),confirm:fd.get('confirm')})});toast('Root 密码已修改')})}
+async function auditModal(){const logs=await api('/api/audit');modal('操作审计',`<div class="audit-list">${logs.map(x=>`<div class="audit-row"><span>${fmtDate(x.time)}</span><strong>${esc(x.action)}</strong><span>${esc(x.target)}</span><b class="${x.success?'success':'failed'}">${x.success?'成功':'失败'}</b><small>${esc(x.ip)}</small><pre>${esc(x.detail)}</pre></div>`).join('')||'暂无审计记录'}</div>`,null,true)}
+
+async function settingsView(){
+  const [s,schedules,backups,notify,upgrade]=await Promise.all([api('/api/settings'),api('/api/advanced/schedules'),api('/api/advanced/backups'),api('/api/advanced/notifications'),api('/api/advanced/upgrade')]);
+  document.body.innerHTML=shell(`${pageHead('面板设置','管理面板身份、管理员密码与运行信息。')}<div class="settings-layout"><article class="panel"><div class="panel-title"><div><h2>基础设置</h2><p>修改后立即生效</p></div></div><form id="settings-form"><label>面板名称<input name="panelName" value="${esc(s.panelName)}" maxlength="40"></label><hr><h3>修改管理员密码（可选）</h3><label>当前密码<input name="currentPassword" type="password"></label><label>新密码<input name="newPassword" type="password" placeholder="至少 16 位，含大小写、数字、符号"></label><div class="form-error"></div><button class="primary" type="submit">保存设置</button></form></article>
+  <article class="panel info-panel">${infoRow('版本',s.version)}${infoRow('管理员',s.admin)}${infoRow('监听地址',s.listen)}${infoRow('数据目录',s.dataDir)}${infoRow('文件根目录',s.fileRoot)}</article></div>
+  <div class="settings-grid advanced-settings"><article class="panel setting-card"><i>◷</i><h2>定时任务</h2><p>${schedules.length} 个 Cron 任务，由 /etc/cron.d/kunpanel 管理。</p><button class="outline" id="schedules">管理任务</button></article>
+  <article class="panel setting-card"><i>▣</i><h2>备份与恢复</h2><p>${backups.length} 个配置备份，包含面板、Nginx、TLS、SSH。</p><button class="outline" id="backups">管理备份</button></article>
+  <article class="panel setting-card"><i>♢</i><h2>Webhook 通知</h2><p>${notify.configured?'已配置 '+esc(notify.url):'尚未配置 HTTPS Webhook'}</p><button class="outline" id="notifications">配置通知</button></article>
+  <article class="panel setting-card"><i>⇧</i><h2>签名自动升级</h2><p>${upgrade.configured?'已配置 Ed25519 签名源':'尚未配置升级清单与公钥'}</p><button class="outline" id="upgrade">升级设置</button></article></div>`);
+  bindShell();$('#settings-form').onsubmit=async e=>{e.preventDefault();try{await api('/api/settings',{method:'PUT',body:JSON.stringify(Object.fromEntries(new FormData(e.target)))});toast('设置已保存，如修改密码请重新登录')}catch(err){$('.form-error',e.target).textContent=err.message}};
+  $('#schedules').onclick=()=>schedulesModal(schedules);$('#backups').onclick=()=>backupsModal(backups);$('#notifications').onclick=()=>notificationModal();$('#upgrade').onclick=()=>upgradeModal(upgrade);
+}
+function schedulesModal(items){modal('定时任务',`<div class="compact-list">${items.map(x=>`<div class="compact-row"><span><strong>${esc(x.name)}</strong><small>${esc(x.cron)} · ${esc(x.command)}</small></span><button class="danger-text" data-del-schedule="${esc(x.id)}">删除</button></div>`).join('')||'暂无任务'}</div><hr><form><label>名称<input name="name" required></label><label>Cron（5 段）<input name="cron" placeholder="0 3 * * *" required></label><label>命令<input name="command" required></label><div class="form-error"></div><button class="primary" type="submit">添加任务</button></form>`,async fd=>{await api('/api/advanced/schedules',{method:'POST',body:JSON.stringify({action:'add',...Object.fromEntries(fd)})});toast('计划任务已添加');settingsView()},true);setTimeout(()=>$$('[data-del-schedule]').forEach(b=>b.onclick=async()=>{await api('/api/advanced/schedules',{method:'POST',body:JSON.stringify({action:'delete',id:b.dataset.delSchedule})});toast('任务已删除');settingsView()}))}
+function backupsModal(items){modal('备份与恢复',`<div class="button-row"><button class="primary" id="create-backup">创建备份</button></div><div class="job-list">${items.map(x=>`<article><strong>${esc(x.name)}</strong><small>${formatBytes(x.size)} · ${fmtDate(x.modified)}</small><button class="danger-text" data-restore="${esc(x.name)}">恢复</button></article>`).join('')||'暂无备份'}</div>`,null,true);$('#create-backup').onclick=async()=>{const j=await api('/api/advanced/backups',{method:'POST',body:JSON.stringify({action:'create'})});toast('备份任务已启动');watchJob(j.id)};$$('[data-restore]').forEach(b=>b.onclick=()=>{const name=b.dataset.restore;modal('恢复备份',`<form><div class="warning-box">恢复会覆盖面板、Nginx、SSL、SSH 和计划任务配置。</div><label>输入 RESTORE ${esc(name)}<input name="confirm" required></label><div class="form-error"></div><button class="danger" type="submit">开始恢复</button></form>`,async fd=>{const j=await api('/api/advanced/backups',{method:'POST',body:JSON.stringify({action:'restore',name,confirm:fd.get('confirm')})});watchJob(j.id)})})}
+function notificationModal(){modal('Webhook 通知',`<form><label>HTTPS Webhook URL<input name="url" type="url" placeholder="https://example.com/webhook"></label><label class="check"><input name="test" type="checkbox"> 保存后发送测试消息</label><div class="form-error"></div><button class="primary" type="submit">保存通知渠道</button></form>`,async fd=>{await api('/api/advanced/notifications',{method:'POST',body:JSON.stringify({url:fd.get('url'),action:fd.has('test')?'test':'save'})});toast('通知设置已保存');settingsView()})}
+function upgradeModal(current){modal('签名自动升级',`<form><div class="warning-box">只有通过 Ed25519 公钥验证的升级清单才会被接受。升级前自动保留 rollback 二进制。</div><label>Manifest URL<input name="manifestURL" type="url" value="${esc(current.manifestURL||'')}" required></label><label>Ed25519 公钥（Base64）<textarea name="publicKey" required></textarea></label><div class="form-error"></div><button class="primary" type="submit">保存升级源</button></form><button class="outline" id="check-upgrade">检查更新</button>`,async fd=>{await api('/api/advanced/upgrade',{method:'POST',body:JSON.stringify({action:'configure',manifestURL:fd.get('manifestURL'),publicKey:fd.get('publicKey')})});toast('升级源已保存');settingsView()});$('#check-upgrade').onclick=async()=>{try{const m=await api('/api/advanced/upgrade',{method:'POST',body:JSON.stringify({action:'check'})});toast('发现版本 '+m.version)}catch(e){toast(e.message,'error')}}}
+
+async function jobsModal(){const jobs=await api('/api/jobs');modal('后台任务',`<div class="job-list">${jobs.map(j=>`<article><div><strong>${esc(j.name)}</strong><span class="${j.status}">${statusText(j.status)}</span></div><small>${fmtDate(j.started)}</small><pre>${esc(j.output||j.error||'等待输出…')}</pre></article>`).join('')||'暂无任务'}</div>`,null,true)}
+async function watchJob(id){for(let i=0;i<240;i++){await new Promise(r=>setTimeout(r,2000));const j=await api('/api/jobs?id='+encodeURIComponent(id));if(j.status!=='running'){toast(j.status==='success'?'安装完成':'安装失败',j.status==='success'?'ok':'error');jobsModal();return}}}
+async function loadMetrics(){try{state.metrics=(await api('/api/metrics?range='+state.range)).points}catch{}}
+
+async function navigate(page){
+  state.page=page;
+  try{
+    if(page==='overview'){state.overview=await api('/api/overview');await loadMetrics();return renderOverview()}
+    if(page==='sites')return sitesView();
+    if(page==='apps')return appsView();
+    if(page==='database')return databasesView();
+    if(page==='files')return filesView();
+    if(page==='firewall')return firewallView();
+    if(page==='terminal')return terminalView();
+    if(page==='security')return securityView();
+    if(page==='settings')return settingsView();
+  }catch(e){toast(e.message,'error')}
+}
+
+async function boot(){try{const status=await api('/api/status');if(!status.configured)return loginView(true);await navigate('overview')}catch{loginView(false)}}
+boot();
