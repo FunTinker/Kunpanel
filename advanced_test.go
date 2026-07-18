@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -18,6 +20,25 @@ func TestValidCron(t *testing.T) {
 		if validCron(value) {
 			t.Fatalf("unsafe cron accepted: %s", value)
 		}
+	}
+}
+
+func TestBackupCommandUsesConfiguredDataDirectory(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), "custom-data")
+	target := filepath.Join(dataDir, "backups", "panel.tar.gz")
+	command := backupCommand(dataDir, target)
+	if !strings.Contains(command, shellQuote(dataDir)) || !strings.Contains(command, "--exclude="+shellQuote(filepath.Join(dataDir, "backups"))) || strings.Contains(command, "/var/lib/tryallfun-panel") {
+		t.Fatalf("backup command does not honor data directory: %s", command)
+	}
+}
+
+func TestAutoOrangeThresholds(t *testing.T) {
+	cfg := config{CloudflareCPUPercent: 80, CloudflareTrafficGB: 10}
+	if autoOrangeThresholdReached(cfg, 79, 9) {
+		t.Fatal("Cloudflare threshold triggered too early")
+	}
+	if !autoOrangeThresholdReached(cfg, 80, 1) || !autoOrangeThresholdReached(cfg, 1, 10) {
+		t.Fatal("Cloudflare CPU or traffic threshold did not trigger")
 	}
 }
 

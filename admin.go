@@ -205,17 +205,33 @@ func (a *app) handleAppDetail(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		installed := appInstalled(spec)
+		services, config := appServiceStates(spec.ID), appConfigHints(spec.ID)
+		if manifest, ok := a.registryManifestByID(spec.ID); ok {
+			services, config = appServiceStatesByName(manifest.Services), manifest.Config
+		}
 		writeJSON(w, 200, map[string]any{
 			"id": spec.ID, "name": spec.Name, "desc": spec.Desc, "category": spec.Category,
 			"version": spec.Version, "icon": spec.Icon, "homepage": spec.Homepage, "license": spec.License,
 			"tags": spec.Tags, "source": spec.Source, "installSize": spec.InstallSize,
 			"verified": true, "installed": installed, "checks": spec.Checks, "commands": spec.Commands,
-			"services": appServiceStates(spec.ID), "config": appConfigHints(spec.ID),
+			"services": services, "config": config,
 			"actions": appActions(spec, installed),
 		})
 		return
 	}
 	writeJSON(w, 404, map[string]string{"error": "应用不存在"})
+}
+
+func appServiceStatesByName(names []string) []map[string]any {
+	var out []map[string]any
+	for _, service := range managedServices() {
+		for _, name := range names {
+			if service["name"] == name {
+				out = append(out, service)
+			}
+		}
+	}
+	return out
 }
 
 func appActions(spec appSpec, installed bool) []string {
@@ -383,6 +399,14 @@ func appInstalled(spec appSpec) bool {
 }
 
 func (a *app) startJob(name string, commands []string, r *http.Request) *job {
+	return a.startJobWithSecrets(name, commands, nil, r)
+}
+
+func (a *app) startSensitiveJob(name string, commands, secrets []string, r *http.Request) *job {
+	return a.startJobWithSecrets(name, commands, secrets, r)
+}
+
+func (a *app) startJobWithSecrets(name string, commands, secrets []string, r *http.Request) *job {
 	j := &job{ID: fmt.Sprintf("%d-%s", time.Now().UnixNano(), randomToken(4)), Name: name, Status: "running", Started: time.Now()}
 	a.mu.Lock()
 	a.jobs[j.ID] = j
@@ -391,9 +415,13 @@ func (a *app) startJob(name string, commands []string, r *http.Request) *job {
 		var output strings.Builder
 		var finalErr error
 		for _, command := range commands {
-			output.WriteString("$ " + command + "\n")
+			if len(secrets) > 0 {
+				output.WriteString("$ [敏感命令已隐藏]\n")
+			} else {
+				output.WriteString("$ " + command + "\n")
+			}
 			out, err := runShell(20*time.Minute, command)
-			output.WriteString(out + "\n")
+			output.WriteString(redactSecrets(out, secrets) + "\n")
 			if output.Len() > 512*1024 {
 				s := output.String()
 				output.Reset()
@@ -421,6 +449,9 @@ func (a *app) startJob(name string, commands []string, r *http.Request) *job {
 }
 
 func (a *app) handleJobs(w http.ResponseWriter, r *http.Request) {
+	if !a.requireRole(w, r, "admin", "operator") {
+		return
+	}
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	if id := r.URL.Query().Get("id"); id != "" {
@@ -1553,9 +1584,12 @@ func (a *app) handleTerminal(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) handleSecurity(w http.ResponseWriter, _ *http.Request) {
 	tls := scanCertificates()
+	a.mu.RLock()
+	twoFactor := a.cfg.TOTPEnabled
+	a.mu.RUnlock()
 	writeJSON(w, 200, map[string]any{
 		"sshPort": sshPort(), "ssh": sshSettings(), "tls": tls,
-		"twoFactor": false, "audit": true, "score": securityScore(tls),
+		"twoFactor": twoFactor, "audit": true, "score": securityScore(tls),
 	})
 }
 
@@ -1682,6 +1716,9 @@ func securityScore(certs []map[string]any) int {
 }
 
 func (a *app) handleAudit(w http.ResponseWriter, r *http.Request) {
+	if !a.requireRole(w, r, "admin", "operator") {
+		return
+	}
 	path := filepath.Join(a.dataDir, "audit.jsonl")
 	f, err := os.Open(path)
 	if err != nil {
@@ -1736,9 +1773,22 @@ func (a *app) handleSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !a.requireRole(w, r, "admin") || !a.requireMaintenance(w, r) {
+		return
+	}
 	var in struct{ PanelName, CurrentPassword, NewPassword string }
 	if !decodeJSON(w, r, &in) {
 		return
+	}
+	if in.NewPassword != "" {
+		if _, ok := a.authenticateUser(a.sessionUser(r), in.CurrentPassword); !ok {
+			writeJSON(w, 403, map[string]string{"error": "当前密码错误"})
+			return
+		}
+		if err := validateStrongPassword(in.NewPassword); err != nil {
+			writeJSON(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -1750,18 +1800,7 @@ func (a *app) handleSettings(w http.ResponseWriter, r *http.Request) {
 		a.cfg.PanelName = strings.TrimSpace(in.PanelName)
 	}
 	if in.NewPassword != "" {
-		salt, _ := base64.RawStdEncoding.DecodeString(a.cfg.PasswordSalt)
-		if hashPassword(in.CurrentPassword, salt) != a.cfg.PasswordHash {
-			writeJSON(w, 403, map[string]string{"error": "当前密码错误"})
-			return
-		}
-		if err := validateStrongPassword(in.NewPassword); err != nil {
-			writeJSON(w, 400, map[string]string{"error": err.Error()})
-			return
-		}
-		newSalt := randomBytes(16)
-		a.cfg.PasswordSalt = base64.RawStdEncoding.EncodeToString(newSalt)
-		a.cfg.PasswordHash = hashPassword(in.NewPassword, newSalt)
+		setAdminPassword(&a.cfg, in.NewPassword)
 		a.cfg.SessionKey = base64.RawStdEncoding.EncodeToString(randomBytes(32))
 	}
 	if err := a.saveConfigUnlocked(); err != nil {
@@ -1783,6 +1822,7 @@ func (a *app) handleCloudflare(w http.ResponseWriter, r *http.Request) {
 			"configured":      (cfg.CloudflareAPIToken != "" || cfg.CloudflareAPIKey != "") && cfg.CloudflareZoneID != "",
 			"autoOrangeCloud": cfg.CloudflareAutoOrangeCloud,
 			"trafficGB":       cfg.CloudflareTrafficGB, "cpuPercent": cfg.CloudflareCPUPercent, "sustainMinutes": cfg.CloudflareSustainMinutes,
+			"lastSwitch": cfg.CloudflareLastSwitch, "lastError": cfg.CloudflareLastError,
 		})
 		return
 	}
@@ -1816,6 +1856,13 @@ func (a *app) handleCloudflare(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.CPUPercent < 0 || in.CPUPercent > 100 || in.TrafficGB < 0 || in.SustainMinutes < 0 || in.SustainMinutes > 1440 {
 		writeJSON(w, 400, map[string]string{"error": "Cloudflare 自动切换阈值无效"})
+		return
+	}
+	a.mu.RLock()
+	existingToken, existingKey := a.cfg.CloudflareAPIToken, a.cfg.CloudflareAPIKey
+	a.mu.RUnlock()
+	if in.AutoOrangeCloud && (in.ZoneID == "" || (in.APIToken == "" && in.APIKey == "" && existingToken == "" && existingKey == "") || (in.CPUPercent == 0 && in.TrafficGB == 0)) {
+		writeJSON(w, 400, map[string]string{"error": "启用自动橙云需要凭据、Zone ID 和至少一个有效阈值"})
 		return
 	}
 	a.mu.Lock()
@@ -1978,14 +2025,29 @@ func randomToken(n int) string {
 }
 
 func clientIP(r *http.Request) string {
-	if v := r.Header.Get("CF-Connecting-IP"); v != "" {
-		return v
+	if r == nil {
+		return "system"
 	}
 	if v := r.Header.Get("X-Real-IP"); v != "" {
 		return v
 	}
-	host, _, _ := strings.Cut(r.RemoteAddr, ":")
+	if v := r.Header.Get("CF-Connecting-IP"); v != "" {
+		return v
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
 	return host
+}
+
+func redactSecrets(value string, secrets []string) string {
+	for _, secret := range secrets {
+		if secret != "" {
+			value = strings.ReplaceAll(value, secret, "[REDACTED]")
+		}
+	}
+	return value
 }
 
 func yesNo(v bool) string {
