@@ -8,6 +8,8 @@ TryAllFun 旗下，面向 Debian 12 的自由、私有 VPS 管理面板。无需
 面板设置，并通过 `frontend` 目录可以从源码重新构建嵌入资源。
 
 - Go 单文件服务，内嵌管理前端
+- 应用商城支持分类搜索、版本/标签/官网元数据、安装、更新、卸载和后台任务输出
+- 应用覆盖 LNMP、Docker、PHP、Node.js、Python、Go、Java、MariaDB、PostgreSQL、Redis、RabbitMQ、Supervisor、HAProxy、Certbot、Fail2ban、ClamAV、Samba、Rsync、WordPress、Laravel、Drupal、phpMyAdmin 等
 - 首次初始化与 16 位强密码策略
 - HttpOnly 签名会话与安全响应头
 - CPU、内存、磁盘、网络实时采样

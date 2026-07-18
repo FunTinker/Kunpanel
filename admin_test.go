@@ -51,3 +51,31 @@ func TestSafePathRejectsTraversal(t *testing.T) {
 		t.Fatal("path traversal accepted")
 	}
 }
+
+func TestCatalogIncludesCoreMarketplaceApps(t *testing.T) {
+	items := catalog()
+	want := map[string]bool{"docker": false, "nodejs": false, "postgres": false, "laravel": false, "certbot": false}
+	for _, item := range items {
+		if _, ok := want[item.ID]; ok {
+			want[item.ID] = true
+		}
+		if item.ID != "wordpress" && (item.Version == "" || item.Homepage == "" || len(item.Tags) == 0 || len(item.Commands) == 0 || len(item.Remove) == 0) {
+			t.Fatalf("app %q is missing marketplace metadata or lifecycle commands", item.ID)
+		}
+	}
+	for id, found := range want {
+		if !found {
+			t.Fatalf("marketplace app %q is missing", id)
+		}
+	}
+}
+
+func TestAppActionsRespectInstallState(t *testing.T) {
+	spec := packageApp("demo", "Demo", "Demo", "测试", "1", "D", "https://example.com", "MIT", []string{"demo"}, []string{"demo"}, []string{"demo"})
+	if got := appActions(spec, false); len(got) != 1 || got[0] != "install" {
+		t.Fatalf("uninstalled actions = %#v", got)
+	}
+	if got := appActions(spec, true); len(got) != 2 || got[0] != "update" || got[1] != "uninstall" {
+		t.Fatalf("installed actions = %#v", got)
+	}
+}

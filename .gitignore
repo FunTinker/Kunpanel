@@ -4,6 +4,7 @@
 /source-archive/
 /tryallfun-panel
 /tryallfun-panel.*
+/tryallfun-panel-*
 
 # Restored historical artifacts and runtime data
 /work/
