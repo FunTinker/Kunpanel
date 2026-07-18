@@ -1,0 +1,23 @@
+# Build output
+/builds/
+/releases/
+/source-archive/
+/tryallfun-panel
+/tryallfun-panel.*
+
+# Restored historical artifacts and runtime data
+/work/
+/outputs/
+*.log
+*.bak.*
+*.tmp.*
+
+# Frontend dependencies
+/frontend/node_modules/
+/frontend/dist/
+/frontend/.vite/
+.gocache/
+
+# Local editor and OS files
+.DS_Store
+Thumbs.db
