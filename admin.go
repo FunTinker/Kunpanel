@@ -1727,7 +1727,7 @@ func (a *app) handleSettings(w http.ResponseWriter, r *http.Request) {
 			name = "TryAllFun Panel"
 		}
 		writeJSON(w, 200, map[string]any{
-			"panelName": name, "admin": admin, "version": "0.3.0",
+			"panelName": name, "admin": admin, "version": panelVersion,
 			"listen": env("TAF_ADDR", addr), "dataDir": a.dataDir, "fileRoot": fileRoot(),
 		})
 		return
