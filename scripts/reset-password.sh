@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-PANEL_BIN="${PANEL_BIN:-/home/wwwroot/Kunpanel.456.life/tryallfun-panel}"
+PANEL_BIN="${PANEL_BIN:-/opt/kunpanel/kunpanel}"
 DATA_DIR="${TAF_DATA_DIR:-/var/lib/tryallfun-panel}"
 
 if [ ! -x "$PANEL_BIN" ]; then

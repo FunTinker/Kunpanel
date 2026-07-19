@@ -1,19 +1,21 @@
 [Unit]
-Description=TryAllFun Server Panel
+Description=KunPanel Server Management Panel
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/home/wwwroot/Kunpanel.456.life
-ExecStart=/home/wwwroot/Kunpanel.456.life/tryallfun-panel
+WorkingDirectory=/opt/kunpanel
+ExecStart=/opt/kunpanel/kunpanel
 Environment=TAF_ADDR=127.0.0.1:8088
 Environment=TAF_DATA_DIR=/var/lib/tryallfun-panel
 Environment=TAF_FILE_ROOT=/home/wwwroot
-Environment=TAF_PROJECT_DIR=/home/wwwroot/Kunpanel.456.life
-Environment=TAF_BINARY_PATH=/home/wwwroot/Kunpanel.456.life/tryallfun-panel
-Environment=TAF_NGINX_BIN=/usr/local/nginx/sbin/nginx
+Environment=TAF_PROJECT_DIR=/opt/kunpanel
+Environment=TAF_BINARY_PATH=/opt/kunpanel/kunpanel
+Environment=TAF_NGINX_VHOST_DIR=/etc/nginx/conf.d
+Environment=TAF_NGINX_SSL_DIR=/etc/nginx/ssl
+UMask=0077
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
