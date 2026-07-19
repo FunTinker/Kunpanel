@@ -912,7 +912,10 @@ func projectDir() string {
 	if exe, err := os.Executable(); err == nil {
 		return filepath.Dir(exe)
 	}
-	return "/home/wwwroot/Kunpanel.456.life"
+	if wd, err := os.Getwd(); err == nil {
+		return wd
+	}
+	return "."
 }
 
 func panelBinaryPath() string {
