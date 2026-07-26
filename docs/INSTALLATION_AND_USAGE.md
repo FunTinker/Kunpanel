@@ -447,6 +447,8 @@ sh scripts/reset-password.sh
 | `TAF_FILE_ROOT` | `/home/wwwroot` | 文件管理允许根目录 |
 | `TAF_PROJECT_DIR` | `/opt/kunpanel` | 项目和升级工作目录 |
 | `TAF_BINARY_PATH` | `/opt/kunpanel/kunpanel` | 当前生产二进制 |
+| `TAF_SERVICE_NAME` | `kunpanel` | 自升级时重启和回滚的 systemd 服务名 |
+| `TAF_HEALTH_URL` | `http://127.0.0.1:8088` | 自升级后的本机健康检查地址 |
 | `TAF_NGINX_BIN` | 自动查找 `nginx` | 自定义 Nginx 可执行文件 |
 | `TAF_NGINX_VHOST_DIR` | 模板为 `/etc/nginx/conf.d` | 站点配置目录 |
 | `TAF_NGINX_SSL_DIR` | 模板为 `/etc/nginx/ssl` | 证书目录 |

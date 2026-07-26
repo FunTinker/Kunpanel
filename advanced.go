@@ -12,7 +12,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -124,7 +126,7 @@ func (a *app) handlePTY(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, 500, map[string]string{"error": err.Error()})
 				return
 			}
-			a.audit(r, "pty.command", in.ID, true, truncate(in.Data, 300))
+			a.audit(r, "pty.command", in.ID, true, "interactive input submitted")
 		case "ctrl-c":
 			_, _ = runCommand(10*time.Second, "tmux", "send-keys", "-t", session, "C-c")
 		case "close":
@@ -456,7 +458,7 @@ func (a *app) handleBackups(w http.ResponseWriter, r *http.Request) {
 	}
 	switch in.Action {
 	case "create":
-		name := "kunpanel-" + time.Now().Format("20060102-150405") + ".tar.gz"
+		name := "kunpanel-" + time.Now().Format("20060102-150405") + "-" + randomToken(3) + ".tar.gz"
 		target := filepath.Join(root, name)
 		j := a.startJob("创建面板备份", []string{backupCommand(a.dataDir, target)}, r)
 		writeJSON(w, 202, j)
@@ -470,10 +472,11 @@ func (a *app) handleBackups(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 404, map[string]string{"error": "备份不存在"})
 			return
 		}
-		j := a.startJob("恢复 "+in.Name, []string{
-			fmt.Sprintf("tar -xzf %s -C /", shellQuote(target)),
-			fmt.Sprintf("%s -t && %s -s reload", shellQuote(nginxBin()), shellQuote(nginxBin())),
-		}, r)
+		if err := validateBackupArchive(target, backupPaths(a.dataDir)); err != nil {
+			writeJSON(w, 400, map[string]string{"error": "备份预检失败: " + err.Error()})
+			return
+		}
+		j := a.startJob("恢复 "+in.Name, []string{restoreCommand(a.dataDir, target)}, r)
 		writeJSON(w, 202, j)
 	default:
 		writeJSON(w, 400, map[string]string{"error": "不支持的备份操作"})
@@ -482,8 +485,97 @@ func (a *app) handleBackups(w http.ResponseWriter, r *http.Request) {
 
 func backupCommand(dataDir, target string) string {
 	backupDir := filepath.Join(dataDir, "backups")
-	return fmt.Sprintf("tar --exclude=%s -czf %s %s /usr/local/nginx/conf/vhost /usr/local/nginx/conf/ssl /etc/ssh/sshd_config /etc/ssh/sshd_config.d /etc/cron.d/kunpanel 2>/dev/null",
-		shellQuote(backupDir), shellQuote(target), shellQuote(dataDir))
+	quoted := make([]string, 0, 8)
+	for _, item := range backupPaths(dataDir) {
+		quoted = append(quoted, shellQuote(item))
+	}
+	relativeBackupDir := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(backupDir)), "/")
+	return fmt.Sprintf("tar --ignore-failed-read --exclude=%s --exclude=%s -czf %s %s",
+		shellQuote(backupDir), shellQuote(relativeBackupDir), shellQuote(target), strings.Join(quoted, " "))
+}
+
+func backupPaths(dataDir string) []string {
+	paths := []string{
+		dataDir,
+		env("TAF_NGINX_VHOST_DIR", "/etc/nginx/conf.d"),
+		env("TAF_NGINX_SSL_DIR", "/etc/nginx/ssl"),
+		"/etc/ssh/sshd_config",
+		"/etc/ssh/sshd_config.d",
+		"/etc/cron.d/kunpanel",
+	}
+	seen := map[string]bool{}
+	result := make([]string, 0, len(paths))
+	for _, item := range paths {
+		item = filepath.Clean(item)
+		if item != "." && !seen[item] {
+			seen[item] = true
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func restoreCommand(dataDir, target string) string {
+	rollback := filepath.Join(dataDir, "backups", ".restore-rollback-"+time.Now().Format("20060102-150405")+"-"+randomToken(3)+".tar.gz")
+	nginx := shellQuote(nginxBin())
+	sshCheck := "( ! command -v sshd >/dev/null || sshd -t )"
+	restoreRollback := fmt.Sprintf("tar -xzf %s -C / && %s -t && %s && %s -s reload", shellQuote(rollback), nginx, sshCheck, nginx)
+	return fmt.Sprintf("set -eu; %s; if ! tar -xzf %s -C / || ! %s -t || ! %s || ! %s -s reload; then %s; exit 1; fi; rm -f %s",
+		backupCommand(dataDir, rollback), shellQuote(target), nginx, sshCheck, nginx, restoreRollback, shellQuote(rollback))
+}
+
+func validateBackupArchive(path string, allowedRoots []string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(io.LimitReader(f, 20<<30))
+	if err != nil {
+		return err
+	}
+	defer gz.Close()
+	allowed := make([]string, 0, len(allowedRoots))
+	for _, root := range allowedRoots {
+		clean := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(root)), "/")
+		if clean != "" && clean != "." {
+			allowed = append(allowed, clean)
+		}
+	}
+	tr := tar.NewReader(gz)
+	var entries int
+	var totalSize int64
+	for {
+		h, nextErr := tr.Next()
+		if errors.Is(nextErr, io.EOF) {
+			return nil
+		}
+		if nextErr != nil {
+			return nextErr
+		}
+		entries++
+		totalSize += max(0, h.Size)
+		if entries > 500000 || totalSize > 20<<30 {
+			return errors.New("备份内容超过安全限制")
+		}
+		if err := validateArchiveName(h.Name); err != nil {
+			return err
+		}
+		if h.Typeflag != tar.TypeDir && h.Typeflag != tar.TypeReg && h.Typeflag != tar.TypeRegA {
+			return fmt.Errorf("备份包含不支持的链接或设备: %s", h.Name)
+		}
+		name := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(h.Name)), "./")
+		permitted := false
+		for _, root := range allowed {
+			if name == root || strings.HasPrefix(name, root+"/") {
+				permitted = true
+				break
+			}
+		}
+		if !permitted {
+			return fmt.Errorf("备份包含未授权路径: %s", h.Name)
+		}
+	}
 }
 
 func (a *app) handleNotifications(w http.ResponseWriter, r *http.Request) {
@@ -584,7 +676,7 @@ func (a *app) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 		binary := panelBinaryPath()
 		update := binary + ".update"
 		rollback := binary + ".rollback"
-		j := a.startJob("升级到 "+manifest.Version, []string{fmt.Sprintf("curl -fsSL %s -o %s", shellQuote(manifest.URL), shellQuote(update))}, r)
+		j := a.startJob("下载升级包 "+manifest.Version, []string{fmt.Sprintf("curl -fsSL %s -o %s", shellQuote(manifest.URL), shellQuote(update))}, r)
 		go func() {
 			for {
 				time.Sleep(time.Second)
@@ -602,21 +694,86 @@ func (a *app) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			b, err := os.ReadFile(update)
-			sum := sha256.Sum256(b)
-			if err != nil || !strings.EqualFold(hex.EncodeToString(sum[:]), manifest.SHA256) {
+			if err != nil {
+				markJobFailed(a, j, "读取升级包失败: "+err.Error())
 				return
 			}
-			cmd := fmt.Sprintf("chmod 0755 %s && systemd-run --unit=kunpanel-update --on-active=2 /bin/bash -c %s",
-				shellQuote(update),
-				shellQuote(fmt.Sprintf("cp %s %s && mv %s %s && systemctl restart tryallfun-panel",
-					shellQuote(binary), shellQuote(rollback), shellQuote(update), shellQuote(binary))),
-			)
-			_, _ = runShell(20*time.Second, cmd)
+			sum := sha256.Sum256(b)
+			if !strings.EqualFold(hex.EncodeToString(sum[:]), manifest.SHA256) {
+				markJobFailed(a, j, "升级包 SHA-256 校验失败")
+				return
+			}
+			if err := os.Chmod(update, 0755); err != nil {
+				markJobFailed(a, j, "设置升级包权限失败: "+err.Error())
+				return
+			}
+			if out, err := runCommand(10*time.Second, update, "version"); err != nil || strings.TrimSpace(out) != manifest.Version {
+				markJobFailed(a, j, "新版本启动自检失败: "+outOrErr(out, err))
+				return
+			}
+			service, healthURL, settingsErr := upgradeRuntimeSettings()
+			if settingsErr != nil {
+				markJobFailed(a, j, settingsErr.Error())
+				return
+			}
+			script := upgradeRollbackScript(binary, update, rollback, service, healthURL)
+			unit := "kunpanel-update-" + strconv.FormatInt(time.Now().Unix(), 10) + "-" + randomToken(3)
+			out, scheduleErr := runCommand(20*time.Second, "systemd-run", "--unit="+unit, "--on-active=2s", "--collect", "/bin/bash", "-c", script)
+			if scheduleErr != nil {
+				markJobFailed(a, j, "无法调度升级任务: "+outOrErr(out, scheduleErr))
+				return
+			}
+			a.audit(nil, "upgrade.schedule", manifest.Version, true, "signed update scheduled with health rollback")
 		}()
 		writeJSON(w, 202, j)
 		return
 	}
 	writeJSON(w, 400, map[string]string{"error": "不支持的升级操作"})
+}
+
+func markJobFailed(a *app, j *job, message string) {
+	a.mu.Lock()
+	j.Status = "failed"
+	j.Error = truncate(message, 1000)
+	j.Finished = time.Now()
+	a.pruneJobsLocked()
+	a.mu.Unlock()
+}
+
+func upgradeRuntimeSettings() (string, string, error) {
+	service := env("TAF_SERVICE_NAME", "kunpanel")
+	if !safeNameRE.MatchString(service) {
+		return "", "", errors.New("TAF_SERVICE_NAME 格式无效")
+	}
+	if healthURL := os.Getenv("TAF_HEALTH_URL"); healthURL != "" {
+		parsed, err := url.Parse(healthURL)
+		if err != nil || parsed == nil {
+			return "", "", errors.New("TAF_HEALTH_URL 必须是本机 HTTP 地址")
+		}
+		hostIP := net.ParseIP(parsed.Hostname())
+		if parsed.Scheme != "http" || parsed.User != nil || parsed.Port() == "" || (parsed.Hostname() != "localhost" && (hostIP == nil || !hostIP.IsLoopback())) {
+			return "", "", errors.New("TAF_HEALTH_URL 必须是本机 HTTP 地址")
+		}
+		return service, strings.TrimRight(healthURL, "/"), nil
+	}
+	listen := env("TAF_ADDR", addr)
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return "", "", errors.New("TAF_ADDR 无法用于升级健康检查")
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return service, "http://" + net.JoinHostPort(host, port), nil
+}
+
+func upgradeRollbackScript(binary, update, rollback, service, healthURL string) string {
+	qBinary, qUpdate, qRollback := shellQuote(binary), shellQuote(update), shellQuote(rollback)
+	qService := shellQuote(service)
+	qHealth := shellQuote(strings.TrimRight(healthURL, "/") + "/api/status")
+	restore := fmt.Sprintf("cp -- %s %s; systemctl restart %s", qRollback, qBinary, qService)
+	return fmt.Sprintf("set -u; cp -- %s %s || exit 1; mv -- %s %s || exit 1; if ! systemctl restart %s; then %s; exit 1; fi; for i in $(seq 1 20); do if curl -fsS --max-time 3 %s | grep -q '\"configured\"'; then exit 0; fi; sleep 1; done; %s; exit 1",
+		qBinary, qRollback, qUpdate, qBinary, qService, restore, qHealth, restore)
 }
 
 func fetchAndVerifyManifest(url, keyText string) (upgradeManifest, error) {

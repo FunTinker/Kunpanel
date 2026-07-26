@@ -13,6 +13,8 @@ Environment=TAF_DATA_DIR=/var/lib/tryallfun-panel
 Environment=TAF_FILE_ROOT=/home/wwwroot
 Environment=TAF_PROJECT_DIR=/opt/kunpanel
 Environment=TAF_BINARY_PATH=/opt/kunpanel/kunpanel
+Environment=TAF_SERVICE_NAME=kunpanel
+Environment=TAF_HEALTH_URL=http://127.0.0.1:8088
 Environment=TAF_NGINX_VHOST_DIR=/etc/nginx/conf.d
 Environment=TAF_NGINX_SSL_DIR=/etc/nginx/ssl
 UMask=0077

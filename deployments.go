@@ -268,9 +268,14 @@ func validGitURL(raw string) bool {
 func (a *app) startArgsJob(name string, commands [][]string, r *http.Request) *job {
 	j := &job{ID: fmt.Sprintf("%d-%s", time.Now().UnixNano(), randomToken(4)), Name: name, Status: "running", Started: time.Now()}
 	a.mu.Lock()
-	a.jobs[j.ID] = j
+	registered := a.registerJobLocked(j)
 	a.mu.Unlock()
+	if !registered {
+		return j
+	}
 	go func() {
+		release := acquireJobExecutionSlot()
+		defer release()
 		var output strings.Builder
 		var finalErr error
 		for _, args := range commands {
@@ -280,6 +285,11 @@ func (a *app) startArgsJob(name string, commands [][]string, r *http.Request) *j
 			output.WriteString("$ " + strings.Join(args, " ") + "\n")
 			out, err := runCommand(20*time.Minute, args[0], args[1:]...)
 			output.WriteString(out + "\n")
+			if output.Len() > maxJobOutput {
+				s := trimJobOutput(output.String())
+				output.Reset()
+				output.WriteString(s)
+			}
 			if err != nil {
 				finalErr = err
 				break
@@ -292,8 +302,9 @@ func (a *app) startArgsJob(name string, commands [][]string, r *http.Request) *j
 		} else {
 			j.Status = "success"
 		}
+		a.pruneJobsLocked()
 		a.mu.Unlock()
-		a.audit(r, "job.args", name, finalErr == nil, outOrErr(j.Output, finalErr))
+		a.audit(r, "job.args", name, finalErr == nil, "background job completed")
 	}()
 	return j
 }
