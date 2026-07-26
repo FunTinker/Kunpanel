@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -410,9 +409,14 @@ func (a *app) startSensitiveJob(name string, commands, secrets []string, r *http
 func (a *app) startJobWithSecrets(name string, commands, secrets []string, r *http.Request) *job {
 	j := &job{ID: fmt.Sprintf("%d-%s", time.Now().UnixNano(), randomToken(4)), Name: name, Status: "running", Started: time.Now()}
 	a.mu.Lock()
-	a.jobs[j.ID] = j
+	registered := a.registerJobLocked(j)
 	a.mu.Unlock()
+	if !registered {
+		return j
+	}
 	go func() {
+		release := acquireJobExecutionSlot()
+		defer release()
 		var output strings.Builder
 		var finalErr error
 		for _, command := range commands {
@@ -423,10 +427,10 @@ func (a *app) startJobWithSecrets(name string, commands, secrets []string, r *ht
 			}
 			out, err := runShell(20*time.Minute, command)
 			output.WriteString(redactSecrets(out, secrets) + "\n")
-			if output.Len() > 512*1024 {
-				s := output.String()
+			if output.Len() > maxJobOutput {
+				s := trimJobOutput(output.String())
 				output.Reset()
-				output.WriteString(s[len(s)-512*1024:])
+				output.WriteString(s)
 			}
 			if err != nil {
 				finalErr = err
@@ -442,8 +446,9 @@ func (a *app) startJobWithSecrets(name string, commands, secrets []string, r *ht
 		} else {
 			j.Status = "success"
 		}
+		a.pruneJobsLocked()
 		a.mu.Unlock()
-		a.audit(r, "job.run", name, finalErr == nil, outOrErr(j.Output, finalErr))
+		a.audit(r, "job.run", name, finalErr == nil, "background job completed")
 		a.sendNotification("job", name, j.Status)
 	}()
 	return j
@@ -1446,6 +1451,8 @@ func (a *app) loadFirewallRules() []firewallRule {
 }
 
 func (a *app) applyFirewallRules(rules []firewallRule) error {
+	a.firewallMu.Lock()
+	defer a.firewallMu.Unlock()
 	var b strings.Builder
 	b.WriteString("table inet tryallfun {\n chain input {\n  type filter hook input priority -10; policy drop;\n  ct state established,related accept\n  iifname \"lo\" accept\n  ip protocol icmp accept\n  ip6 nexthdr ipv6-icmp accept\n")
 	for _, rule := range rules {
@@ -1461,15 +1468,24 @@ func (a *app) applyFirewallRules(rules []firewallRule) error {
 	}
 	b.WriteString(" }\n}\n")
 	conf := filepath.Join(a.dataDir, "tryallfun-panel.nft")
-	if err := atomicWrite(conf, []byte(b.String()), 0600); err != nil {
+	transaction := b.String()
+	if nftTableExists() {
+		transaction = "delete table inet tryallfun\n" + transaction
+	}
+	applyConf := conf + ".apply"
+	if err := atomicWrite(applyConf, []byte(transaction), 0600); err != nil {
 		return err
 	}
-	if out, err := runCommand(15*time.Second, "nft", "-c", "-f", conf); err != nil {
+	defer os.Remove(applyConf)
+	if out, err := runCommand(15*time.Second, "nft", "-c", "-f", applyConf); err != nil {
 		return errors.New(outOrErr(out, err))
 	}
-	_, _ = runCommand(10*time.Second, "nft", "delete", "table", "inet", "tryallfun")
-	if out, err := runCommand(15*time.Second, "nft", "-f", conf); err != nil {
+	// A single nft batch is committed atomically, so a failed replacement keeps the old table.
+	if out, err := runCommand(15*time.Second, "nft", "-f", applyConf); err != nil {
 		return errors.New(outOrErr(out, err))
+	}
+	if err := atomicWrite(conf, []byte(b.String()), 0600); err != nil {
+		return err
 	}
 	data, _ := json.MarshalIndent(rules, "", "  ")
 	return atomicWrite(filepath.Join(a.dataDir, "firewall.json"), data, 0600)
@@ -1616,27 +1632,40 @@ func (a *app) handleSecurityAction(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 400, map[string]string{"error": "SSH 参数或确认文本无效"})
 			return
 		}
+		a.sshMu.Lock()
+		defer a.sshMu.Unlock()
 		content := fmt.Sprintf("# managed-by: tryallfun-panel\nPort %d\nPasswordAuthentication %s\nPermitRootLogin %s\nPubkeyAuthentication yes\n",
 			in.Port, yesNo(in.PasswordAuth), rootLoginValue(in.RootLogin))
 		target := "/etc/ssh/sshd_config.d/99-tryallfun-panel.conf"
-		if old, err := os.ReadFile(target); err == nil {
-			_ = os.WriteFile(target+".bak."+time.Now().Format("20060102150405"), old, 0600)
+		old, readErr := os.ReadFile(target)
+		existed := readErr == nil
+		oldMode := os.FileMode(0600)
+		if info, statErr := os.Stat(target); statErr == nil {
+			oldMode = info.Mode().Perm()
+		}
+		if existed {
+			_ = atomicWrite(target+".bak."+time.Now().Format("20060102150405")+"."+randomToken(3), old, oldMode)
 		}
 		if err := atomicWrite(target, []byte(content), 0600); err != nil {
 			writeJSON(w, 500, map[string]string{"error": err.Error()})
 			return
 		}
 		if out, err := runCommand(15*time.Second, "sshd", "-t"); err != nil {
-			_ = os.Remove(target)
-			writeJSON(w, 500, map[string]string{"error": outOrErr(out, err)})
+			rollbackErr := restoreManagedFile(target, old, oldMode, existed)
+			writeJSON(w, 500, map[string]string{"error": rollbackMessage(outOrErr(out, err), rollbackErr)})
 			return
 		}
 		out, err := runCommand(20*time.Second, "systemctl", "reload", "ssh")
-		a.audit(r, "security.ssh", fmt.Sprintf("port=%d", in.Port), err == nil, outOrErr(out, err))
 		if err != nil {
-			writeJSON(w, 500, map[string]string{"error": outOrErr(out, err)})
+			rollbackErr := restoreManagedFile(target, old, oldMode, existed)
+			if rollbackErr == nil {
+				_, rollbackErr = runCommand(20*time.Second, "systemctl", "reload", "ssh")
+			}
+			a.audit(r, "security.ssh", fmt.Sprintf("port=%d", in.Port), false, "reload failed; configuration rollback attempted")
+			writeJSON(w, 500, map[string]string{"error": rollbackMessage(outOrErr(out, err), rollbackErr)})
 			return
 		}
+		a.audit(r, "security.ssh", fmt.Sprintf("port=%d", in.Port), true, "configuration validated and reloaded")
 	case "root-password":
 		if in.Confirm != "CHANGE ROOT PASSWORD" {
 			writeJSON(w, 400, map[string]string{"error": "确认文本无效"})
@@ -1657,6 +1686,23 @@ func (a *app) handleSecurityAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func restoreManagedFile(path string, previous []byte, mode os.FileMode, existed bool) error {
+	if existed {
+		return atomicWrite(path, previous, mode)
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func rollbackMessage(original string, rollbackErr error) string {
+	if rollbackErr != nil {
+		return original + "; 自动回滚失败: " + rollbackErr.Error()
+	}
+	return original + "; 已恢复原配置"
 }
 
 func sshSettings() map[string]any {
@@ -1721,39 +1767,15 @@ func (a *app) handleAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := filepath.Join(a.dataDir, "audit.jsonl")
-	f, err := os.Open(path)
-	if err != nil {
-		writeJSON(w, 200, []auditEntry{})
-		return
-	}
-	defer f.Close()
-	var entries []auditEntry
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 64*1024), 2<<20)
-	for scanner.Scan() {
-		var entry auditEntry
-		if json.Unmarshal(scanner.Bytes(), &entry) == nil {
-			entries = append(entries, entry)
-		}
-	}
-	for i, j := 0, len(entries)-1; i < j; i, j = i+1, j-1 {
-		entries[i], entries[j] = entries[j], entries[i]
-	}
-	if len(entries) > 200 {
-		entries = entries[:200]
-	}
-	writeJSON(w, 200, entries)
+	writeJSON(w, 200, readRecentAuditEntries(path, 200))
 }
 
 func (a *app) audit(r *http.Request, action, target string, success bool, detail string) {
-	entry := auditEntry{time.Now(), action, target, success, truncate(detail, 4000), clientIP(r)}
+	target, detail = safeAuditFields(action, target, detail)
+	entry := auditEntry{time.Now(), action, target, success, detail, clientIP(r)}
 	b, _ := json.Marshal(entry)
 	path := filepath.Join(a.dataDir, "audit.jsonl")
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
-	if err == nil {
-		_, _ = f.Write(append(b, '\n'))
-		_ = f.Close()
-	}
+	a.appendAuditLine(path, append(b, '\n'))
 }
 
 func (a *app) handleSettings(w http.ResponseWriter, r *http.Request) {
@@ -2029,15 +2051,17 @@ func clientIP(r *http.Request) string {
 	if r == nil {
 		return "system"
 	}
-	if v := r.Header.Get("X-Real-IP"); v != "" {
-		return v
-	}
-	if v := r.Header.Get("CF-Connecting-IP"); v != "" {
-		return v
-	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		host = r.RemoteAddr
+	}
+	remoteIP := net.ParseIP(host)
+	if remoteIP != nil && remoteIP.IsLoopback() {
+		for _, header := range []string{"X-Real-IP", "CF-Connecting-IP"} {
+			if value := strings.TrimSpace(r.Header.Get(header)); net.ParseIP(value) != nil {
+				return value
+			}
+		}
 	}
 	return host
 }

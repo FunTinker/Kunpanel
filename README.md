@@ -14,8 +14,10 @@ KunPanel 是面向 Debian 12 的自由、私有 VPS 管理面板。无需手机�
 - [安全策略](SECURITY.md)
 - [参与贡献](CONTRIBUTING.md)
 
-## v0.6.0 功能
+## v0.6.1 功能
 
+- 安全修复：终端审计脱敏、历史日志迁移与轮转、Argon2id 密码哈希、任务资源上限
+- 可靠性修复：nftables 原子提交、SSH 配置回滚、备份预检、自升级健康检查与自动回退
 - Go 单二进制服务，内嵌可从 `frontend` 源码重新构建的管理前端
 - CPU、内存、磁盘、网络监控以及 1 小时至 30 天聚合趋势
 - Nginx 静态站、PHP、WordPress、反向代理和 Let's Encrypt 证书管理

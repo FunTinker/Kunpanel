@@ -17,6 +17,7 @@ const (
 	loginFailureWindow = 10 * time.Minute
 	loginBlockDuration = 15 * time.Minute
 	maxLoginFailures   = 5
+	maxLoginAttempts   = 10000
 )
 
 func (a *app) loginRetryAfter(key string) int {
@@ -50,10 +51,17 @@ func (a *app) recordLoginFailure(key string) {
 	if a.loginAttempts == nil {
 		a.loginAttempts = map[string]loginAttempt{}
 	}
-	if len(a.loginAttempts) >= 10000 {
+	if len(a.loginAttempts) >= maxLoginAttempts {
 		for existingKey, existing := range a.loginAttempts {
 			if now.Sub(existing.LastFailure) > loginFailureWindow && now.After(existing.BlockedUntil) {
 				delete(a.loginAttempts, existingKey)
+			}
+		}
+		if _, exists := a.loginAttempts[key]; !exists && len(a.loginAttempts) >= maxLoginAttempts {
+			// Keep a hard memory bound even when every existing entry is still active.
+			for existingKey := range a.loginAttempts {
+				delete(a.loginAttempts, existingKey)
+				break
 			}
 		}
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -92,6 +93,23 @@ func TestAuthenticateRBACUser(t *testing.T) {
 	}
 }
 
+func TestLegacyPasswordIsRehashedAfterLogin(t *testing.T) {
+	salt := []byte("0123456789abcdef")
+	dataDir := t.TempDir()
+	a := &app{
+		cfgPath: filepath.Join(dataDir, "config.json"),
+		cfg: config{Admin: "owner", PasswordSalt: b64(salt), PasswordHash: legacyHashPassword("Strong-Test-2026!", salt), Users: map[string]userRecord{
+			"owner": {PasswordSalt: b64(salt), PasswordHash: legacyHashPassword("Strong-Test-2026!", salt), Role: "admin"},
+		}},
+	}
+	if _, ok := a.authenticateUser("owner", "Strong-Test-2026!"); !ok {
+		t.Fatal("legacy password was rejected")
+	}
+	if !strings.HasPrefix(a.cfg.PasswordHash, passwordHashPrefix) || !strings.HasPrefix(a.cfg.Users["owner"].PasswordHash, passwordHashPrefix) {
+		t.Fatal("legacy password was not upgraded to Argon2id")
+	}
+}
+
 func TestSetAdminPasswordSynchronizesUserDirectory(t *testing.T) {
 	oldSalt := []byte("0123456789abcdef")
 	cfg := config{Admin: "owner", PasswordSalt: b64(oldSalt), PasswordHash: hashPassword("Old-Password-2026!", oldSalt), Users: map[string]userRecord{"owner": {PasswordSalt: b64(oldSalt), PasswordHash: hashPassword("Old-Password-2026!", oldSalt), Role: "admin", Created: time.Now()}}}
@@ -116,6 +134,17 @@ func TestLoginFailureLockout(t *testing.T) {
 	a.clearLoginFailures("owner|127.0.0.1")
 	if retry := a.loginRetryAfter("owner|127.0.0.1"); retry != 0 {
 		t.Fatalf("successful login did not clear lockout: %d", retry)
+	}
+}
+
+func TestLoginFailureMapHasHardLimit(t *testing.T) {
+	a := &app{loginAttempts: make(map[string]loginAttempt, maxLoginAttempts)}
+	for i := 0; i < maxLoginAttempts; i++ {
+		a.loginAttempts[fmt.Sprintf("192.0.2.%d", i)] = loginAttempt{LastFailure: time.Now()}
+	}
+	a.recordLoginFailure("198.51.100.1")
+	if len(a.loginAttempts) > maxLoginAttempts {
+		t.Fatalf("login failure map exceeded limit: %d", len(a.loginAttempts))
 	}
 }
 

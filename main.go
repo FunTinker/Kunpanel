@@ -5,7 +5,6 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -32,7 +31,7 @@ import (
 
 const (
 	addr              = "127.0.0.1:8088"
-	panelVersion      = "0.6.0"
+	panelVersion      = "0.6.1"
 	sessionMaxAge     = 12 * time.Hour
 	maintenanceMaxAge = 10 * time.Minute
 )
@@ -87,6 +86,9 @@ type loginAttempt struct {
 
 type app struct {
 	mu                   sync.RWMutex
+	auditMu              sync.Mutex
+	firewallMu           sync.Mutex
+	sshMu                sync.Mutex
 	nodeMu               sync.RWMutex
 	nodeOpMu             sync.Mutex
 	cfg                  config
@@ -112,12 +114,19 @@ func main() {
 	if err := os.MkdirAll(dataDir, 0700); err != nil {
 		log.Fatal(err)
 	}
+	if len(os.Args) > 1 && os.Args[1] == "version" {
+		fmt.Println(panelVersion)
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "reset-password" {
 		if err := resetPasswordCLI(dataDir); err != nil {
 			log.Fatal(err)
 		}
 		fmt.Println("管理员密码已重置，所有旧会话已失效。")
 		return
+	}
+	if err := migrateLegacyAuditLogs(dataDir); err != nil {
+		log.Printf("migrate audit logs: %v", err)
 	}
 	a := &app{
 		cfgPath:       filepath.Join(dataDir, "config.json"),
@@ -299,13 +308,14 @@ func (a *app) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	salt := randomBytes(16)
+	passwordHash := hashPassword(in.Password, salt)
 	a.cfg = config{
 		Admin:        in.Username,
 		PasswordSalt: base64.RawStdEncoding.EncodeToString(salt),
-		PasswordHash: hashPassword(in.Password, salt),
+		PasswordHash: passwordHash,
 		SessionKey:   base64.RawStdEncoding.EncodeToString(randomBytes(32)),
 		PanelName:    "TryAllFun Panel",
-		Users:        map[string]userRecord{in.Username: {PasswordSalt: base64.RawStdEncoding.EncodeToString(salt), PasswordHash: hashPassword(in.Password, salt), Role: "admin", Created: time.Now()}},
+		Users:        map[string]userRecord{in.Username: {PasswordSalt: base64.RawStdEncoding.EncodeToString(salt), PasswordHash: passwordHash, Role: "admin", Created: time.Now()}},
 	}
 	a.mu.Unlock()
 	if err := a.saveConfig(); err != nil {
@@ -325,7 +335,7 @@ func (a *app) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	key := strings.ToLower(strings.TrimSpace(in.Username)) + "|" + clientIP(r)
+	key := clientIP(r)
 	if retry := a.loginRetryAfter(key); retry > 0 {
 		w.Header().Set("Retry-After", strconv.Itoa(retry))
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "登录失败次数过多，请稍后再试"})
@@ -357,10 +367,11 @@ func (a *app) authenticateUser(username, password string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	salt, _ := base64.RawStdEncoding.DecodeString(user.PasswordSalt)
-	expected, _ := hex.DecodeString(user.PasswordHash)
-	actual, _ := hex.DecodeString(hashPassword(password, salt))
-	return user.Role, subtle.ConstantTimeCompare(expected, actual) == 1
+	valid, needsRehash := verifyPassword(password, user.PasswordHash, user.PasswordSalt)
+	if valid && needsRehash {
+		a.rehashUserPassword(username, password)
+	}
+	return user.Role, valid
 }
 
 func (a *app) handleLogout(w http.ResponseWriter, _ *http.Request) {
@@ -544,10 +555,11 @@ func (a *app) validPassword(password string) bool {
 	a.mu.RLock()
 	cfg := a.cfg
 	a.mu.RUnlock()
-	salt, _ := base64.RawStdEncoding.DecodeString(cfg.PasswordSalt)
-	expected, _ := hex.DecodeString(cfg.PasswordHash)
-	actual, _ := hex.DecodeString(hashPassword(password, salt))
-	return subtle.ConstantTimeCompare(expected, actual) == 1
+	valid, needsRehash := verifyPassword(password, cfg.PasswordHash, cfg.PasswordSalt)
+	if valid && needsRehash {
+		a.rehashUserPassword(cfg.Admin, password)
+	}
+	return valid
 }
 
 func (a *app) sign(s string) string {
@@ -854,18 +866,6 @@ func validateCredentials(user, password string) error {
 	return nil
 }
 
-func hashPassword(password string, salt []byte) string {
-	value := append(append([]byte(nil), salt...), []byte(password)...)
-	sum := sha256.Sum256(value)
-	for i := 0; i < 600000; i++ {
-		h := sha256.New()
-		_, _ = h.Write(sum[:])
-		_, _ = h.Write(salt)
-		sum = sha256.Sum256(h.Sum(nil))
-	}
-	return hex.EncodeToString(sum[:])
-}
-
 func setAdminPassword(cfg *config, password string) {
 	salt := randomBytes(16)
 	cfg.PasswordSalt = base64.RawStdEncoding.EncodeToString(salt)
@@ -879,6 +879,25 @@ func setAdminPassword(cfg *config, password string) {
 		owner.Created = time.Now()
 	}
 	cfg.Users[cfg.Admin] = owner
+}
+
+func (a *app) rehashUserPassword(username, password string) {
+	salt := randomBytes(16)
+	hash := hashPassword(password, salt)
+	a.mu.Lock()
+	user, ok := a.cfg.Users[username]
+	if ok {
+		user.PasswordSalt, user.PasswordHash = base64.RawStdEncoding.EncodeToString(salt), hash
+		a.cfg.Users[username] = user
+	}
+	if username == a.cfg.Admin {
+		a.cfg.PasswordSalt, a.cfg.PasswordHash = base64.RawStdEncoding.EncodeToString(salt), hash
+	}
+	err := a.saveConfigUnlocked()
+	a.mu.Unlock()
+	if err != nil {
+		log.Printf("upgrade password hash for %q: %v", username, err)
+	}
 }
 
 func safePath(root, requested string) (string, error) {

@@ -491,20 +491,23 @@ func runCommandEnvInput(timeout time.Duration, input string, extraEnv []string, 
 func (a *app) startNodeJob(name string, r *http.Request, work func() (string, error)) *job {
 	j := &job{ID: fmt.Sprintf("%d-%s", time.Now().UnixNano(), randomToken(4)), Name: name, Status: "running", Started: time.Now()}
 	a.mu.Lock()
-	if a.jobs == nil {
-		a.jobs = map[string]*job{}
-	}
-	a.jobs[j.ID] = j
+	registered := a.registerJobLocked(j)
 	a.mu.Unlock()
+	if !registered {
+		return j
+	}
 	go func() {
+		release := acquireJobExecutionSlot()
+		defer release()
 		out, err := work()
 		a.mu.Lock()
-		j.Output, j.Finished = out, time.Now()
+		j.Output, j.Finished = trimJobOutput(out), time.Now()
 		if err != nil {
 			j.Status, j.Error = "failed", err.Error()
 		} else {
 			j.Status = "success"
 		}
+		a.pruneJobsLocked()
 		a.mu.Unlock()
 		a.audit(r, "node.job", name, err == nil, "remote node operation completed")
 	}()
