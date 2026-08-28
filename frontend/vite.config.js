@@ -7,7 +7,7 @@ export default defineConfig({
     rollupOptions: {
       output: {
         entryFileNames: 'assets/app.js',
-        chunkFileNames: 'assets/app.js',
+        chunkFileNames: 'assets/[name]-[hash].js',
         assetFileNames: ({ name }) => name && name.endsWith('.css') ? 'assets/app.css' : 'assets/[name][extname]'
       }
     }

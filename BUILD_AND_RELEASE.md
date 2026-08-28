@@ -4,8 +4,8 @@
 
 ## 构建环境
 
-- Go 1.22+
-- Node.js 20+，仅重新构建前端时需要
+- Go 1.25+
+- Node.js 22+，仅重新构建前端时需要
 - npm
 - Git
 
@@ -81,7 +81,7 @@ SSH 密码关闭和端口迁移属于破坏性测试，必须在可重装的专�
 
 公开发布应包含：
 
-- Git 标签，例如 `v0.6.0`；
+- Git 标签，例如 `v0.7.0`；
 - amd64 和 arm64 Linux 二进制；
 - `SHA256SUMS`；
 - 完整源码归档；
@@ -106,8 +106,8 @@ go run ./cmd/sign-update keygen
 签名发布清单：
 
 ```bash
-go run ./cmd/sign-update sign kunpanel-update-private.key v0.6.1 \
-  https://downloads.example.com/kunpanel-v0.6.1-linux-amd64 \
+go run ./cmd/sign-update sign kunpanel-update-private.key v0.7.0 \
+  https://downloads.example.com/kunpanel-v0.7.0-linux-amd64 \
   releases/kunpanel-linux-amd64 "安全与稳定性更新" > manifest.json
 ```
 

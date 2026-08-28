@@ -4,7 +4,7 @@ KunPanel 是面向 Debian 12 的自由、私有 VPS 管理面板。无需手机�
 
 项目完整源代码以 [Apache License 2.0](LICENSE) 开源，公开仓库为 <https://github.com/FunTinker/Kunpanel>。
 
-> **版本状态：Beta。** v0.6.x 已完成自动化测试、浏览器验收和 Debian 12 生产部署，但面板会以 root 权限执行系统管理操作。上线前必须配置 HTTPS、访问控制、离线备份和服务商控制台救援能力。
+> **版本状态：Beta。** v0.7.x 已完成自动化测试、浏览器验收和 Debian 12 生产部署，但面板会以 root 权限执行系统管理操作。上线前必须配置 HTTPS、访问控制、离线备份和服务商控制台救援能力。
 
 ## 文档
 
@@ -14,8 +14,13 @@ KunPanel 是面向 Debian 12 的自由、私有 VPS 管理面板。无需手机�
 - [安全策略](SECURITY.md)
 - [参与贡献](CONTRIBUTING.md)
 
-## v0.6.1 功能
+## v0.7.0 功能
 
+- 安全外连：Webhook 与签名升级只允许受控 HTTPS，阻止私网、回环、链路本地、DNS 重绑定和重定向绕过
+- 文件安全：归档解压使用操作系统级目录根约束，拒绝 Zip Slip、归档符号链接及预置链接逃逸
+- 会话安全：Cookie 默认强制 Secure，代理协议头仅信任本机代理，密码和角色变更会精确失效目标用户会话
+- 工程升级：Go 1.25、Vite 8、Vue 3.5、最新加密依赖和 GitHub Actions，前端依赖审计为 0 漏洞
+- 交互修复：危险操作统一使用面板内确认窗口，移除在嵌入式浏览器中不可靠的原生 prompt/confirm
 - 安全修复：终端审计脱敏、历史日志迁移与轮转、Argon2id 密码哈希、任务资源上限
 - 可靠性修复：nftables 原子提交、SSH 配置回滚、备份预检、自升级健康检查与自动回退
 - Go 单二进制服务，内嵌可从 `frontend` 源码重新构建的管理前端
@@ -44,7 +49,7 @@ KunPanel 是面向 Debian 12 的自由、私有 VPS 管理面板。无需手机�
 
 ## 快速体验
 
-需要 Go 1.22+ 和 Node.js 20+：
+需要 Go 1.25+ 和 Node.js 22+：
 
 ```bash
 cd frontend
@@ -82,9 +87,9 @@ sh scripts/reset-password.sh
 
 ```bash
 go run ./cmd/sign-update keygen
-go run ./cmd/sign-update sign kunpanel-update-private.key v0.6.1 \
-  https://updates.example.com/kunpanel-v0.6.1 \
-  ./kunpanel-v0.6.1 "安全与稳定性更新" > manifest.json
+go run ./cmd/sign-update sign kunpanel-update-private.key v0.7.0 \
+  https://updates.example.com/kunpanel-v0.7.0 \
+  ./kunpanel-v0.7.0 "安全与稳定性更新" > manifest.json
 ```
 
 只需把二进制和 `manifest.json` 放到 HTTPS 静态源，并在面板设置中填写 Manifest URL 与公钥。私钥不得上传服务器或提交到仓库。

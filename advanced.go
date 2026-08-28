@@ -593,9 +593,12 @@ func (a *app) handleNotifications(w http.ResponseWriter, r *http.Request) {
 	if !a.requireMaintenance(w, r) {
 		return
 	}
-	if in.URL != "" && !strings.HasPrefix(in.URL, "https://") {
-		writeJSON(w, 400, map[string]string{"error": "通知地址必须使用 HTTPS"})
-		return
+	in.URL = strings.TrimSpace(in.URL)
+	if in.URL != "" {
+		if _, err := validatePublicHTTPSURL(in.URL); err != nil {
+			writeJSON(w, 400, map[string]string{"error": "通知地址无效: " + err.Error()})
+			return
+		}
 	}
 	a.mu.Lock()
 	a.cfg.NotifyURL = in.URL
@@ -607,10 +610,15 @@ func (a *app) handleNotifications(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.Action == "test" && in.URL != "" {
 		body := strings.NewReader(`{"event":"test","title":"KunPanel 通知测试","message":"通知渠道配置成功"}`)
-		req, _ := http.NewRequest(http.MethodPost, in.URL, body)
+		parsed, _ := validatePublicHTTPSURL(in.URL)
+		req, reqErr := http.NewRequest(http.MethodPost, parsed.String(), body)
+		if reqErr != nil {
+			writeJSON(w, 400, map[string]string{"error": reqErr.Error()})
+			return
+		}
 		req.Header.Set("Content-Type", "application/json")
-		client := http.Client{Timeout: 15 * time.Second}
-		resp, reqErr := client.Do(req)
+		client := newPublicHTTPClient(15 * time.Second)
+		resp, reqErr := doPublicRequest(client, req)
 		if reqErr != nil {
 			writeJSON(w, 400, map[string]string{"error": reqErr.Error()})
 			return
@@ -639,9 +647,10 @@ func (a *app) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 	if !a.requireMaintenance(w, r) {
 		return
 	}
+	in.ManifestURL = strings.TrimSpace(in.ManifestURL)
 	if in.Action == "configure" {
-		if !strings.HasPrefix(in.ManifestURL, "https://") {
-			writeJSON(w, 400, map[string]string{"error": "升级清单必须使用 HTTPS"})
+		if _, err := validatePublicHTTPSURL(in.ManifestURL); err != nil {
+			writeJSON(w, 400, map[string]string{"error": "升级清单地址无效: " + err.Error()})
 			return
 		}
 		if _, err := base64.StdEncoding.DecodeString(in.PublicKey); err != nil {
@@ -669,75 +678,44 @@ func (a *app) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if in.Action == "apply" {
-		if !strings.HasPrefix(manifest.URL, "https://") {
-			writeJSON(w, 400, map[string]string{"error": "upgrade package must use HTTPS"})
+		if _, err := validatePublicHTTPSURL(manifest.URL); err != nil {
+			writeJSON(w, 400, map[string]string{"error": "upgrade package URL is invalid: " + err.Error()})
 			return
 		}
 		binary := panelBinaryPath()
 		update := binary + ".update"
 		rollback := binary + ".rollback"
-		j := a.startJob("下载升级包 "+manifest.Version, []string{fmt.Sprintf("curl -fsSL %s -o %s", shellQuote(manifest.URL), shellQuote(update))}, r)
-		go func() {
-			for {
-				time.Sleep(time.Second)
-				a.mu.RLock()
-				done := j.Status != "running"
-				a.mu.RUnlock()
-				if done {
-					break
-				}
+		j := a.startManagedJob("下载并验证升级包 "+manifest.Version, r, func() (string, error) {
+			if err := downloadPublicHTTPSFile(manifest.URL, update, maxUpgradeBytes); err != nil {
+				return "", fmt.Errorf("下载升级包失败: %w", err)
 			}
-			a.mu.RLock()
-			success := j.Status == "success"
-			a.mu.RUnlock()
-			if !success {
-				return
-			}
-			b, err := os.ReadFile(update)
+			actualHash, err := sha256File(update)
 			if err != nil {
-				markJobFailed(a, j, "读取升级包失败: "+err.Error())
-				return
+				return "", fmt.Errorf("读取升级包失败: %w", err)
 			}
-			sum := sha256.Sum256(b)
-			if !strings.EqualFold(hex.EncodeToString(sum[:]), manifest.SHA256) {
-				markJobFailed(a, j, "升级包 SHA-256 校验失败")
-				return
-			}
-			if err := os.Chmod(update, 0755); err != nil {
-				markJobFailed(a, j, "设置升级包权限失败: "+err.Error())
-				return
+			if !strings.EqualFold(actualHash, manifest.SHA256) {
+				return "", errors.New("升级包 SHA-256 校验失败")
 			}
 			if out, err := runCommand(10*time.Second, update, "version"); err != nil || strings.TrimSpace(out) != manifest.Version {
-				markJobFailed(a, j, "新版本启动自检失败: "+outOrErr(out, err))
-				return
+				return "", errors.New("新版本启动自检失败: " + outOrErr(out, err))
 			}
-			service, healthURL, settingsErr := upgradeRuntimeSettings()
-			if settingsErr != nil {
-				markJobFailed(a, j, settingsErr.Error())
-				return
+			service, healthURL, err := upgradeRuntimeSettings()
+			if err != nil {
+				return "", err
 			}
 			script := upgradeRollbackScript(binary, update, rollback, service, healthURL)
 			unit := "kunpanel-update-" + strconv.FormatInt(time.Now().Unix(), 10) + "-" + randomToken(3)
-			out, scheduleErr := runCommand(20*time.Second, "systemd-run", "--unit="+unit, "--on-active=2s", "--collect", "/bin/bash", "-c", script)
-			if scheduleErr != nil {
-				markJobFailed(a, j, "无法调度升级任务: "+outOrErr(out, scheduleErr))
-				return
+			out, err := runCommand(20*time.Second, "systemd-run", "--unit="+unit, "--on-active=2s", "--collect", "/bin/bash", "-c", script)
+			if err != nil {
+				return "", errors.New("无法调度升级任务: " + outOrErr(out, err))
 			}
 			a.audit(nil, "upgrade.schedule", manifest.Version, true, "signed update scheduled with health rollback")
-		}()
+			return "升级包校验通过，已调度带健康检查的升级任务\n", nil
+		})
 		writeJSON(w, 202, j)
 		return
 	}
 	writeJSON(w, 400, map[string]string{"error": "不支持的升级操作"})
-}
-
-func markJobFailed(a *app, j *job, message string) {
-	a.mu.Lock()
-	j.Status = "failed"
-	j.Error = truncate(message, 1000)
-	j.Finished = time.Now()
-	a.pruneJobsLocked()
-	a.mu.Unlock()
 }
 
 func upgradeRuntimeSettings() (string, string, error) {
@@ -781,8 +759,15 @@ func fetchAndVerifyManifest(url, keyText string) (upgradeManifest, error) {
 	if url == "" || keyText == "" {
 		return manifest, errors.New("尚未配置签名升级源")
 	}
-	client := http.Client{Timeout: 20 * time.Second}
-	resp, err := client.Get(url)
+	parsed, err := validatePublicHTTPSURL(url)
+	if err != nil {
+		return manifest, err
+	}
+	req, err := http.NewRequest(http.MethodGet, parsed.String(), nil)
+	if err != nil {
+		return manifest, err
+	}
+	resp, err := doPublicRequest(newPublicHTTPClient(20*time.Second), req)
 	if err != nil {
 		return manifest, err
 	}
@@ -793,19 +778,42 @@ func fetchAndVerifyManifest(url, keyText string) (upgradeManifest, error) {
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&manifest); err != nil {
 		return manifest, err
 	}
+	if err := verifyUpgradeManifest(manifest, keyText); err != nil {
+		return manifest, err
+	}
+	return manifest, nil
+}
+
+func verifyUpgradeManifest(manifest upgradeManifest, keyText string) error {
+	if _, err := validatePublicHTTPSURL(manifest.URL); err != nil {
+		return errors.New("升级包地址无效: " + err.Error())
+	}
 	pub, err := base64.StdEncoding.DecodeString(keyText)
 	if err != nil || len(pub) != ed25519.PublicKeySize {
-		return manifest, errors.New("Ed25519 公钥无效")
+		return errors.New("Ed25519 公钥无效")
 	}
 	sig, err := base64.StdEncoding.DecodeString(manifest.Signature)
 	if err != nil {
-		return manifest, errors.New("签名格式无效")
+		return errors.New("签名格式无效")
 	}
 	message := manifest.Version + "\n" + manifest.URL + "\n" + strings.ToLower(manifest.SHA256)
 	if !ed25519.Verify(ed25519.PublicKey(pub), []byte(message), sig) {
-		return manifest, errors.New("升级清单签名验证失败")
+		return errors.New("升级清单签名验证失败")
 	}
-	return manifest, nil
+	return nil
+}
+
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func safeExtractZip(archivePath, dest string) error {
@@ -814,19 +822,21 @@ func safeExtractZip(archivePath, dest string) error {
 		return err
 	}
 	defer zr.Close()
+	root, err := openArchiveRoot(dest)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	for _, item := range zr.File {
-		if err := validateArchiveName(item.Name); err != nil {
-			return err
-		}
 		if item.FileInfo().Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("refusing symlink in archive: %s", item.Name)
 		}
-		target, err := safeExtractTarget(dest, item.Name)
+		relative, err := safeArchiveRelativePath(item.Name)
 		if err != nil {
 			return err
 		}
 		if item.FileInfo().IsDir() {
-			if err := os.MkdirAll(target, 0755); err != nil {
+			if err := ensureArchiveRootDirectory(root, relative, 0755); err != nil {
 				return err
 			}
 			continue
@@ -834,17 +844,22 @@ func safeExtractZip(archivePath, dest string) error {
 		if !item.FileInfo().Mode().IsRegular() {
 			return fmt.Errorf("unsupported archive entry: %s", item.Name)
 		}
-		if fileExists(target) {
-			continue
+		if info, err := root.Lstat(relative); err == nil {
+			if info.Mode().IsRegular() {
+				continue
+			}
+			return fmt.Errorf("refusing existing non-regular extraction target: %s", item.Name)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
 		}
-		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		if err := ensureArchiveRootDirectory(root, filepath.Dir(relative), 0755); err != nil {
 			return err
 		}
 		rc, err := item.Open()
 		if err != nil {
 			return err
 		}
-		err = writeNewFile(target, rc, item.FileInfo().Mode().Perm())
+		err = writeNewRootFile(root, relative, rc, item.FileInfo().Mode().Perm())
 		_ = rc.Close()
 		if err != nil {
 			return err
@@ -864,6 +879,11 @@ func safeExtractTarGz(archivePath, dest string) error {
 		return err
 	}
 	defer gz.Close()
+	root, err := openArchiveRoot(dest)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	tr := tar.NewReader(gz)
 	for {
 		h, err := tr.Next()
@@ -873,26 +893,28 @@ func safeExtractTarGz(archivePath, dest string) error {
 		if err != nil {
 			return err
 		}
-		if err := validateArchiveName(h.Name); err != nil {
-			return err
-		}
-		target, err := safeExtractTarget(dest, h.Name)
+		relative, err := safeArchiveRelativePath(h.Name)
 		if err != nil {
 			return err
 		}
 		switch h.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0755); err != nil {
+			if err := ensureArchiveRootDirectory(root, relative, 0755); err != nil {
 				return err
 			}
 		case tar.TypeReg, tar.TypeRegA:
-			if fileExists(target) {
-				continue
-			}
-			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			if info, err := root.Lstat(relative); err == nil {
+				if info.Mode().IsRegular() {
+					continue
+				}
+				return fmt.Errorf("refusing existing non-regular extraction target: %s", h.Name)
+			} else if !errors.Is(err, os.ErrNotExist) {
 				return err
 			}
-			if err := writeNewFile(target, tr, os.FileMode(h.Mode).Perm()); err != nil {
+			if err := ensureArchiveRootDirectory(root, filepath.Dir(relative), 0755); err != nil {
+				return err
+			}
+			if err := writeNewRootFile(root, relative, tr, os.FileMode(h.Mode).Perm()); err != nil {
 				return err
 			}
 		default:
@@ -902,49 +924,77 @@ func safeExtractTarGz(archivePath, dest string) error {
 }
 
 func validateArchiveName(name string) error {
-	clean := filepath.Clean(strings.ReplaceAll(name, "\\", "/"))
-	if clean == "." || filepath.IsAbs(clean) || strings.HasPrefix(clean, "../") || clean == ".." || strings.Contains(clean, ":") {
-		return fmt.Errorf("unsafe archive path: %s", name)
-	}
-	return nil
+	_, err := safeArchiveRelativePath(name)
+	return err
 }
 
-func safeExtractTarget(dest, name string) (string, error) {
-	absDest, err := filepath.Abs(dest)
-	if err != nil {
-		return "", err
-	}
-	if realDest, err := filepath.EvalSymlinks(absDest); err == nil {
-		absDest = realDest
-	}
-	target := filepath.Join(absDest, filepath.Clean(strings.ReplaceAll(name, "\\", "/")))
-	clean, err := safePath(absDest, target)
-	if err != nil {
-		return "", err
-	}
-	rel, err := filepath.Rel(absDest, clean)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("archive path escapes destination: %s", name)
+func safeArchiveRelativePath(name string) (string, error) {
+	normalized := strings.ReplaceAll(name, "\\", "/")
+	clean := filepath.Clean(filepath.FromSlash(normalized))
+	if clean == "." || !filepath.IsLocal(clean) || strings.Contains(clean, ":") {
+		return "", fmt.Errorf("unsafe archive path: %s", name)
 	}
 	return clean, nil
 }
 
-func writeNewFile(path string, r io.Reader, mode os.FileMode) error {
+func openArchiveRoot(dest string) (*os.Root, error) {
+	info, err := os.Lstat(dest)
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("extraction destination must be a real directory")
+	}
+	return os.OpenRoot(dest)
+}
+
+func ensureArchiveRootDirectory(root *os.Root, relative string, mode os.FileMode) error {
+	if relative == "." {
+		return nil
+	}
+	if _, err := safeArchiveRelativePath(relative); err != nil {
+		return err
+	}
+	current := ""
+	for _, component := range strings.Split(filepath.ToSlash(relative), "/") {
+		if current == "" {
+			current = component
+		} else {
+			current = filepath.Join(current, component)
+		}
+		info, err := root.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			if err := root.Mkdir(current, mode); err != nil && !errors.Is(err, os.ErrExist) {
+				return err
+			}
+			info, err = root.Lstat(current)
+		}
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing non-directory extraction path: %s", relative)
+		}
+	}
+	return nil
+}
+
+func writeNewRootFile(root *os.Root, relative string, r io.Reader, mode os.FileMode) error {
 	if mode == 0 || mode&0111 != 0 {
 		mode = 0644
 	}
-	out, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
+	out, err := root.OpenFile(relative, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
 	if err != nil {
 		return err
 	}
 	_, copyErr := io.Copy(out, io.LimitReader(r, 2<<30))
 	closeErr := out.Close()
 	if copyErr != nil {
-		_ = os.Remove(path)
+		_ = root.Remove(relative)
 		return copyErr
 	}
 	if closeErr != nil {
-		_ = os.Remove(path)
+		_ = root.Remove(relative)
 		return closeErr
 	}
 	return nil
@@ -965,11 +1015,18 @@ func (a *app) sendNotification(event, title, message string) {
 	if url == "" {
 		return
 	}
+	parsed, err := validatePublicHTTPSURL(url)
+	if err != nil {
+		return
+	}
 	payload, _ := json.Marshal(map[string]string{"event": event, "title": title, "message": message, "time": time.Now().Format(time.RFC3339)})
-	req, _ := http.NewRequest(http.MethodPost, url, strings.NewReader(string(payload)))
+	req, err := http.NewRequest(http.MethodPost, parsed.String(), strings.NewReader(string(payload)))
+	if err != nil {
+		return
+	}
 	req.Header.Set("Content-Type", "application/json")
-	client := http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	client := newPublicHTTPClient(10 * time.Second)
+	resp, err := doPublicRequest(client, req)
 	if err == nil {
 		_ = resp.Body.Close()
 	}

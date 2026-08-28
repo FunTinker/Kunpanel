@@ -32,6 +32,7 @@ func hashPassword(password string, salt []byte) string {
 }
 
 func legacyHashPassword(password string, salt []byte) string {
+	// Compatibility verifier for pre-Argon2id configs. New passwords must never use this format.
 	value := append(append([]byte(nil), salt...), []byte(password)...)
 	sum := sha256.Sum256(value)
 	for i := 0; i < 600000; i++ {

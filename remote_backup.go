@@ -45,8 +45,9 @@ func (a *app) handleRemoteBackups(w http.ResponseWriter, r *http.Request) {
 		}
 		a.mu.Lock()
 		a.cfg.RemoteBackupRemote, a.cfg.RemoteBackupPath, a.cfg.RemoteBackupEnabled = in.Remote, clean, in.Enabled
+		err := a.saveConfigUnlocked()
 		a.mu.Unlock()
-		if err := a.saveConfig(); err != nil {
+		if err != nil {
 			writeJSON(w, 500, map[string]string{"error": err.Error()})
 			return
 		}

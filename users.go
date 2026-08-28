@@ -63,9 +63,10 @@ func (a *app) handleUsers(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 409, map[string]string{"error": "用户已存在"})
 			return
 		}
-		a.cfg.Users[in.Username] = userRecord{PasswordSalt: b64(salt), PasswordHash: hashPassword(in.Password, salt), Role: in.Role, Created: time.Now()}
+		a.cfg.Users[in.Username] = userRecord{PasswordSalt: b64(salt), PasswordHash: hashPassword(in.Password, salt), Role: in.Role, SessionToken: randomToken(16), Created: time.Now()}
+		err := a.saveConfigUnlocked()
 		a.mu.Unlock()
-		if err := a.saveConfig(); err != nil {
+		if err != nil {
 			writeJSON(w, 500, map[string]string{"error": err.Error()})
 			return
 		}
@@ -95,6 +96,7 @@ func (a *app) handleUsers(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		user.Role = in.Role
+		user.SessionToken = randomToken(16)
 		a.cfg.Users[in.Username] = user
 	case "password":
 		if err := validateStrongPassword(in.Password); err != nil {
@@ -104,10 +106,12 @@ func (a *app) handleUsers(w http.ResponseWriter, r *http.Request) {
 		}
 		salt := randomBytes(16)
 		user.PasswordSalt, user.PasswordHash = b64(salt), hashPassword(in.Password, salt)
+		user.SessionToken = randomToken(16)
 		a.cfg.Users[in.Username] = user
 	}
+	err := a.saveConfigUnlocked()
 	a.mu.Unlock()
-	if err := a.saveConfig(); err != nil {
+	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}

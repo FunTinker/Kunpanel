@@ -31,7 +31,7 @@ import (
 
 const (
 	addr              = "127.0.0.1:8088"
-	panelVersion      = "0.6.1"
+	panelVersion      = "0.7.0"
 	sessionMaxAge     = 12 * time.Hour
 	maintenanceMaxAge = 10 * time.Minute
 )
@@ -67,6 +67,7 @@ type userRecord struct {
 	PasswordSalt string    `json:"passwordSalt"`
 	PasswordHash string    `json:"passwordHash"`
 	Role         string    `json:"role"`
+	SessionToken string    `json:"sessionToken,omitempty"`
 	Created      time.Time `json:"created"`
 }
 
@@ -263,21 +264,9 @@ func (a *app) loadConfig() error {
 		changed = true
 	}
 	if changed {
-		return a.saveConfig()
+		return a.saveConfigUnlocked()
 	}
 	return nil
-}
-
-func (a *app) saveConfig() error {
-	b, err := json.MarshalIndent(a.cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := a.cfgPath + ".tmp"
-	if err := os.WriteFile(tmp, b, 0600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, a.cfgPath)
 }
 
 func (a *app) handleStatus(w http.ResponseWriter, _ *http.Request) {
@@ -315,10 +304,11 @@ func (a *app) handleSetup(w http.ResponseWriter, r *http.Request) {
 		PasswordHash: passwordHash,
 		SessionKey:   base64.RawStdEncoding.EncodeToString(randomBytes(32)),
 		PanelName:    "TryAllFun Panel",
-		Users:        map[string]userRecord{in.Username: {PasswordSalt: base64.RawStdEncoding.EncodeToString(salt), PasswordHash: passwordHash, Role: "admin", Created: time.Now()}},
+		Users:        map[string]userRecord{in.Username: {PasswordSalt: base64.RawStdEncoding.EncodeToString(salt), PasswordHash: passwordHash, Role: "admin", SessionToken: randomToken(16), Created: time.Now()}},
 	}
+	err := a.saveConfigUnlocked()
 	a.mu.Unlock()
-	if err := a.saveConfig(); err != nil {
+	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
@@ -374,8 +364,9 @@ func (a *app) authenticateUser(username, password string) (string, bool) {
 	return user.Role, valid
 }
 
-func (a *app) handleLogout(w http.ResponseWriter, _ *http.Request) {
-	http.SetCookie(w, &http.Cookie{Name: "taf_session", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode})
+func (a *app) handleLogout(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{Name: "taf_session", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: secureCookies(r)})
+	http.SetCookie(w, &http.Cookie{Name: "taf_maintenance", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: secureCookies(r)})
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
@@ -400,7 +391,7 @@ func (a *app) csrf(next http.Handler) http.Handler {
 			origin := r.Header.Get("Origin")
 			if origin != "" {
 				expected := "http://" + r.Host
-				if r.Header.Get("X-Forwarded-Proto") == "https" || r.TLS != nil {
+				if requestUsesHTTPS(r) {
 					expected = "https://" + r.Host
 				}
 				if origin != expected {
@@ -415,12 +406,13 @@ func (a *app) csrf(next http.Handler) http.Handler {
 
 func (a *app) setSession(w http.ResponseWriter, r *http.Request, user string) {
 	expires := time.Now().Add(sessionMaxAge).Unix()
-	payload := fmt.Sprintf("%s|%d", user, expires)
+	sessionToken, _ := a.userSessionToken(user)
+	payload := fmt.Sprintf("%s|%s|%d", user, sessionToken, expires)
 	sig := a.sign(payload)
 	http.SetCookie(w, &http.Cookie{
 		Name: "taf_session", Value: base64.RawURLEncoding.EncodeToString([]byte(payload + "|" + sig)),
 		Path: "/", MaxAge: int(sessionMaxAge.Seconds()), HttpOnly: true, SameSite: http.SameSiteStrictMode,
-		Secure: r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
+		Secure: secureCookies(r),
 	})
 }
 
@@ -447,7 +439,7 @@ func (a *app) handleMaintenanceUnlock(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name: "taf_maintenance", Value: base64.RawURLEncoding.EncodeToString([]byte(payload + "|" + sig)),
 		Path: "/", MaxAge: int(maintenanceMaxAge.Seconds()), HttpOnly: true, SameSite: http.SameSiteStrictMode,
-		Secure: r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
+		Secure: secureCookies(r),
 	})
 	a.audit(r, "maintenance.unlock", "panel", true, "10m")
 	writeJSON(w, 200, map[string]any{"ok": true, "expires": expires})
@@ -492,24 +484,33 @@ func (a *app) validSession(r *http.Request) bool {
 		return false
 	}
 	parts := strings.Split(string(raw), "|")
-	if len(parts) != 3 {
+	if len(parts) != 3 && len(parts) != 4 {
 		return false
 	}
-	exp, err := strconv.ParseInt(parts[1], 10, 64)
+	username, sessionToken, expiryIndex, signatureIndex := parts[0], "", 1, 2
+	if len(parts) == 4 {
+		sessionToken, expiryIndex, signatureIndex = parts[1], 2, 3
+	}
+	exp, err := strconv.ParseInt(parts[expiryIndex], 10, 64)
 	if err != nil || time.Now().Unix() > exp {
 		return false
 	}
-	return a.userExists(parts[0]) && hmac.Equal([]byte(parts[2]), []byte(a.sign(parts[0]+"|"+parts[1])))
+	currentToken, exists := a.userSessionToken(username)
+	if !exists || currentToken != sessionToken {
+		return false
+	}
+	payload := strings.Join(parts[:signatureIndex], "|")
+	return hmac.Equal([]byte(parts[signatureIndex]), []byte(a.sign(payload)))
 }
 
-func (a *app) userExists(username string) bool {
+func (a *app) userSessionToken(username string) (string, bool) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	if username == a.cfg.Admin {
-		return true
+		return a.cfg.Users[username].SessionToken, true
 	}
-	_, ok := a.cfg.Users[username]
-	return ok
+	user, ok := a.cfg.Users[username]
+	return user.SessionToken, ok
 }
 
 func (a *app) sessionUser(r *http.Request) string {
@@ -522,7 +523,7 @@ func (a *app) sessionUser(r *http.Request) string {
 		return ""
 	}
 	parts := strings.Split(string(raw), "|")
-	if len(parts) != 3 || !a.validSession(r) {
+	if (len(parts) != 3 && len(parts) != 4) || !a.validSession(r) {
 		return ""
 	}
 	return parts[0]
@@ -569,6 +570,32 @@ func (a *app) sign(s string) string {
 	mac := hmac.New(sha256.New, key)
 	_, _ = mac.Write([]byte(s))
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func secureCookies(r *http.Request) bool {
+	if os.Getenv("TAF_ALLOW_INSECURE_COOKIES") == "1" {
+		return requestUsesHTTPS(r)
+	}
+	return true
+}
+
+func requestUsesHTTPS(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if r.TLS != nil {
+		return true
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	remoteIP := net.ParseIP(host)
+	if remoteIP == nil || !remoteIP.IsLoopback() {
+		return false
+	}
+	proto := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0])
+	return strings.EqualFold(proto, "https")
 }
 
 func (a *app) startSampler() {
@@ -646,7 +673,7 @@ func (a *app) handleOverview(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, 200, map[string]any{
 		"hostname": host, "os": readOS(), "kernel": runtime.GOOS + " " + runtime.GOARCH,
 		"uptime": humanDuration(time.Since(a.started)), "load": load, "latest": latest,
-		"cpuCores": runtime.NumCPU(), "ip": localIP(),
+		"cpuCores": runtime.NumCPU(), "ip": localIP(), "version": panelVersion,
 	})
 }
 

@@ -1,6 +1,6 @@
 # KunPanel 安装与使用手册
 
-本文适用于 KunPanel v0.6.x。当前版本建议以 **Beta** 方式公开使用：核心管理、权限、安全和回滚流程已有自动化测试与生产部署验证，但 KunPanel 会以 root 权限管理系统，不应在未备份、未配置 HTTPS 或没有服务商控制台救援能力的服务器上直接执行高风险操作。
+本文适用于 KunPanel v0.7.x。当前版本建议以 **Beta** 方式公开使用：核心管理、权限、安全和回滚流程已有自动化测试与生产部署验证，但 KunPanel 会以 root 权限管理系统，不应在未备份、未配置 HTTPS 或没有服务商控制台救援能力的服务器上直接执行高风险操作。
 
 ## 1. 支持范围
 
@@ -11,13 +11,13 @@
 - 至少 1 核 CPU、1 GB 内存、2 GB 可用磁盘
 - 一个已解析到服务器的独立域名
 - root 或等效的系统管理权限
-- Go 1.22 或更高版本，用于从源码构建
+- Go 1.25 或更高版本，用于从源码构建
 
 面板默认监听 `127.0.0.1:8088`，不应直接监听公网地址。外部访问应经过 Nginx 和 HTTPS。
 
 ### 1.2 版本状态
 
-- v0.6.x 属于 Beta 版本。
+- v0.7.x 属于 Beta 版本。
 - Debian 12 是当前主要测试平台。
 - Ubuntu、Rocky Linux、AlmaLinux 等系统尚未完成完整兼容矩阵。
 - 节点 SSH 加固和端口迁移包含验证与回滚，但执行前仍必须准备云厂商控制台或串行控制台。
@@ -56,13 +56,13 @@ apt-get install -y \
 
 ### 2.3 安装 Go
 
-Debian 12 默认仓库中的 Go 版本可能低于项目要求。请从 <https://go.dev/dl/> 安装 Go 1.22 或更高版本，然后验证：
+Debian 12 默认仓库中的 Go 版本低于项目要求。请从 <https://go.dev/dl/> 安装 Go 1.25 或更高版本，然后验证：
 
 ```bash
 go version
 ```
 
-只使用仓库已构建的 `web/dist` 时不需要 Node.js。修改前端源码时需要 Node.js 20 或更高版本。
+只使用仓库已构建的 `web/dist` 时不需要 Node.js。修改前端源码时需要 Node.js 22 或更高版本。
 
 ## 3. 从源码安装
 
@@ -452,6 +452,8 @@ sh scripts/reset-password.sh
 | `TAF_NGINX_BIN` | 自动查找 `nginx` | 自定义 Nginx 可执行文件 |
 | `TAF_NGINX_VHOST_DIR` | 模板为 `/etc/nginx/conf.d` | 站点配置目录 |
 | `TAF_NGINX_SSL_DIR` | 模板为 `/etc/nginx/ssl` | 证书目录 |
+| `TAF_ALLOW_INSECURE_COOKIES` | 不设置 | 仅本地 HTTP 开发可设为 `1`，生产环境禁止启用 |
+| `TAF_ALLOW_PRIVATE_OUTBOUND` | 不设置 | 仅确需访问可信内网 Webhook/升级源时设为 `1`，启用后会放宽 SSRF 防护 |
 
 修改 systemd 环境变量后执行：
 

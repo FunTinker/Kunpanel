@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Security fixes are applied to the latest v0.6.x release line. Older builds may
+Security fixes are applied to the latest v0.7.x release line. Older builds may
 receive no fixes and should be upgraded after reviewing release notes and
 making a verified backup.
 

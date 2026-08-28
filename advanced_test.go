@@ -6,9 +6,6 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -111,15 +108,7 @@ func TestSignedUpgradeManifest(t *testing.T) {
 	}
 	message := manifest.Version + "\n" + manifest.URL + "\n" + manifest.SHA256
 	manifest.Signature = base64.StdEncoding.EncodeToString(ed25519.Sign(private, []byte(message)))
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(manifest)
-	}))
-	defer server.Close()
-	got, err := fetchAndVerifyManifest(server.URL, base64.StdEncoding.EncodeToString(pub))
-	if err != nil {
+	if err := verifyUpgradeManifest(manifest, base64.StdEncoding.EncodeToString(pub)); err != nil {
 		t.Fatal(err)
-	}
-	if got.Version != manifest.Version {
-		t.Fatalf("version = %q", got.Version)
 	}
 }

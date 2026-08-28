@@ -407,16 +407,7 @@ func (a *app) startSensitiveJob(name string, commands, secrets []string, r *http
 }
 
 func (a *app) startJobWithSecrets(name string, commands, secrets []string, r *http.Request) *job {
-	j := &job{ID: fmt.Sprintf("%d-%s", time.Now().UnixNano(), randomToken(4)), Name: name, Status: "running", Started: time.Now()}
-	a.mu.Lock()
-	registered := a.registerJobLocked(j)
-	a.mu.Unlock()
-	if !registered {
-		return j
-	}
-	go func() {
-		release := acquireJobExecutionSlot()
-		defer release()
+	return a.startManagedJob(name, r, func() (string, error) {
 		var output strings.Builder
 		var finalErr error
 		for _, command := range commands {
@@ -437,12 +428,28 @@ func (a *app) startJobWithSecrets(name string, commands, secrets []string, r *ht
 				break
 			}
 		}
+		return output.String(), finalErr
+	})
+}
+
+func (a *app) startManagedJob(name string, r *http.Request, work func() (string, error)) *job {
+	j := &job{ID: fmt.Sprintf("%d-%s", time.Now().UnixNano(), randomToken(4)), Name: name, Status: "running", Started: time.Now()}
+	a.mu.Lock()
+	registered := a.registerJobLocked(j)
+	a.mu.Unlock()
+	if !registered {
+		return j
+	}
+	go func() {
+		release := acquireJobExecutionSlot()
+		defer release()
+		output, finalErr := work()
 		a.mu.Lock()
-		j.Output = output.String()
+		j.Output = trimJobOutput(output)
 		j.Finished = time.Now()
 		if finalErr != nil {
 			j.Status = "failed"
-			j.Error = finalErr.Error()
+			j.Error = truncate(finalErr.Error(), 1000)
 		} else {
 			j.Status = "success"
 		}
@@ -1157,6 +1164,9 @@ func (a *app) handleFiles(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseMultipartForm(128 << 20); err != nil {
 			writeJSON(w, 400, map[string]string{"error": "上传内容无效或超过 128MB"})
 			return
+		}
+		if r.MultipartForm != nil {
+			defer r.MultipartForm.RemoveAll()
 		}
 		dir, err := safePath(root, r.FormValue("path"))
 		if err != nil {
@@ -1912,6 +1922,8 @@ func (a *app) handleCloudflare(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) saveConfigUnlocked() error {
+	// The caller must hold a.mu for writing. loadConfig is the only exception and
+	// runs before any background goroutine starts.
 	b, err := json.MarshalIndent(a.cfg, "", "  ")
 	if err != nil {
 		return err
@@ -1977,23 +1989,74 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 func (b *limitedBuffer) String() string { b.mu.Lock(); defer b.mu.Unlock(); return b.b.String() }
 
 func atomicWrite(path string, data []byte, mode os.FileMode) error {
-	tmp := path + ".tmp." + randomToken(4)
-	if err := os.WriteFile(tmp, data, mode); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmp, mode); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, path)
-}
-
-func backupFile(path string) error {
-	b, err := os.ReadFile(path)
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path+".bak."+time.Now().Format("20060102150405"), b, 0600)
+	tmpPath := tmp.Name()
+	ok := false
+	defer func() {
+		_ = tmp.Close()
+		if !ok {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if err := tmp.Chmod(mode); err != nil {
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	ok = true
+	return nil
+}
+
+func backupFile(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("refusing to back up a non-regular file")
+	}
+	in, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	backupPath := path + ".bak." + time.Now().Format("20060102150405") + "." + randomToken(4)
+	out, err := os.OpenFile(backupPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	ok := false
+	defer func() {
+		_ = out.Close()
+		if !ok {
+			_ = os.Remove(backupPath)
+		}
+	}()
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	ok = true
+	return nil
 }
 
 func decodeJSONLimit(w http.ResponseWriter, r *http.Request, out any, limit int64) bool {
