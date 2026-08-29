@@ -67,7 +67,7 @@ sha256sum releases/kunpanel-linux-* > releases/SHA256SUMS
 
 1. `go test ./...` 和 `go vet ./...` 通过。
 2. 前端 `npm run build` 通过。
-3. Linux 二进制文件头和 SHA-256 正确。
+3. Linux 二进制文件头和 SHA-256 正确，并在安装 nftables 的 Linux 环境通过 `nft -c` 生成规则语法检查。
 4. 在隔离数据目录完成首次初始化、登录和核心页面检查。
 5. 检查桌面与移动端布局没有横向页面溢出。
 6. 检查未登录 API 返回 `401`。
@@ -81,7 +81,7 @@ SSH 密码关闭和端口迁移属于破坏性测试，必须在可重装的专�
 
 公开发布应包含：
 
-- Git 标签，例如 `v0.7.0`；
+- Git 标签，例如 `v0.8.0`；
 - amd64 和 arm64 Linux 二进制；
 - `SHA256SUMS`；
 - 完整源码归档；
@@ -106,8 +106,8 @@ go run ./cmd/sign-update keygen
 签名发布清单：
 
 ```bash
-go run ./cmd/sign-update sign kunpanel-update-private.key v0.7.0 \
-  https://downloads.example.com/kunpanel-v0.7.0-linux-amd64 \
+go run ./cmd/sign-update sign kunpanel-update-private.key v0.8.0 \
+  https://downloads.example.com/kunpanel-v0.8.0-linux-amd64 \
   releases/kunpanel-linux-amd64 "安全与稳定性更新" > manifest.json
 ```
 

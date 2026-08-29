@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -60,14 +61,16 @@ type appSpec struct {
 }
 
 type firewallRule struct {
-	ID          string `json:"id"`
-	Direction   string `json:"direction,omitempty"`
-	Port        int    `json:"port"`
-	Protocol    string `json:"protocol"`
-	Source      string `json:"source"`
-	Destination string `json:"destination,omitempty"`
-	Action      string `json:"action"`
-	Note        string `json:"note"`
+	ID          string    `json:"id"`
+	Direction   string    `json:"direction,omitempty"`
+	Port        int       `json:"port"`
+	Protocol    string    `json:"protocol"`
+	Source      string    `json:"source"`
+	Destination string    `json:"destination,omitempty"`
+	Action      string    `json:"action"`
+	Note        string    `json:"note"`
+	CreatedAt   time.Time `json:"createdAt"`
+	CreatedBy   string    `json:"createdBy"`
 }
 
 var (
@@ -119,7 +122,7 @@ func catalog() []appSpec {
 		{"docker", "Docker Engine", "Debian 官方 Docker Engine 与 Compose 插件", "容器", "24.x", "D", "https://docs.docker.com/", "Apache-2.0", []string{"容器", "Compose", "部署"}, "Debian", "220 MB", []string{"apt-get update", "DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-compose-plugin", "systemctl enable --now docker"}, []string{"DEBIAN_FRONTEND=noninteractive apt-get purge -y docker.io docker-compose-plugin", "apt-get autoremove -y"}, []string{"apt-get update", "DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y docker.io docker-compose-plugin"}, []string{"docker"}},
 		{"redis", "Redis", "高性能内存数据库，支持持久化与缓存", "数据库", "7.x", "R", "https://redis.io/", "BSD", []string{"缓存", "队列", "数据库"}, "Debian", "45 MB", []string{"apt-get update", "DEBIAN_FRONTEND=noninteractive apt-get install -y redis-server", "systemctl enable --now redis-server"}, []string{"DEBIAN_FRONTEND=noninteractive apt-get purge -y redis-server", "apt-get autoremove -y"}, []string{"apt-get update", "DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y redis-server"}, []string{"redis-server"}},
 		{"postgres", "PostgreSQL", "可靠的开源关系型数据库与扩展生态", "数据库", "15.x", "P", "https://www.postgresql.org/", "PostgreSQL", []string{"数据库", "SQL", "GIS"}, "Debian", "180 MB", []string{"apt-get update", "DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql postgresql-contrib", "systemctl enable --now postgresql"}, []string{"DEBIAN_FRONTEND=noninteractive apt-get purge -y postgresql postgresql-contrib", "apt-get autoremove -y"}, []string{"apt-get update", "DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y postgresql postgresql-contrib"}, []string{"psql"}},
-		{"fail2ban", "Fail2ban", "自动封禁恶意登录来源，保护 SSH 与 Web 服务", "安全", "1.0", "F", "https://www.fail2ban.org/", "GPL-2.0", []string{"安全", "SSH", "防爆破"}, "Debian", "20 MB", []string{"apt-get update", "DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban", "systemctl enable --now fail2ban"}, []string{"DEBIAN_FRONTEND=noninteractive apt-get purge -y fail2ban", "apt-get autoremove -y"}, []string{"apt-get update", "DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y fail2ban"}, []string{"fail2ban-client"}},
+		{"fail2ban", "Fail2ban", "读取 KunPanel 与 SSH 日志，作为应用内限流和 nftables 动态封禁之外的第二层防护", "安全", "1.1", "F", "https://www.fail2ban.org/", "GPL-2.0", []string{"安全", "SSH", "防爆破", "密码喷洒"}, "Debian", "20 MB", []string{"apt-get update", "DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban", "test ! -f \"$TAF_PROJECT_DIR/source/deploy/fail2ban/filter.d/kunpanel-auth.conf\" || install -m 0644 \"$TAF_PROJECT_DIR/source/deploy/fail2ban/filter.d/kunpanel-auth.conf\" /etc/fail2ban/filter.d/kunpanel-auth.conf", "test ! -f \"$TAF_PROJECT_DIR/source/deploy/fail2ban/jail.d/kunpanel-auth.conf\" || install -m 0644 \"$TAF_PROJECT_DIR/source/deploy/fail2ban/jail.d/kunpanel-auth.conf\" /etc/fail2ban/jail.d/kunpanel-auth.conf", "fail2ban-client -t", "systemctl enable --now fail2ban"}, []string{"DEBIAN_FRONTEND=noninteractive apt-get purge -y fail2ban", "apt-get autoremove -y"}, []string{"apt-get update", "DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y fail2ban", "fail2ban-client reload"}, []string{"fail2ban-client"}},
 		{"nftables", "nftables", "Debian 原生防火墙管理框架，默认拒绝并保护 SSH", "安全", "1.0", "N", "https://wiki.nftables.org/", "GPL-2.0", []string{"安全", "防火墙", "网络"}, "Debian", "12 MB", []string{"apt-get update", "DEBIAN_FRONTEND=noninteractive apt-get install -y nftables", "systemctl enable --now nftables"}, []string{"DEBIAN_FRONTEND=noninteractive apt-get purge -y nftables", "apt-get autoremove -y"}, []string{"apt-get update", "DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y nftables"}, []string{"nft"}},
 	}
 	apps = append(apps,
@@ -1360,9 +1363,14 @@ func (a *app) handleFileAction(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) handleFirewall(w http.ResponseWriter, r *http.Request) {
 	rules := a.loadFirewallRules()
+	blocks := a.loadSecurityBlocks()
 	writeJSON(w, 200, map[string]any{
 		"installed": commandExists("nft"), "enabled": nftTableExists(), "backend": "nftables",
-		"rules": rules,
+		"rules": rules, "blocks": blocks, "events": a.recentSecurityEvents(40),
+		"protections": map[string]bool{
+			"defaultDeny": true, "invalidPackets": true, "scanFlags": true,
+			"sourceRateLimit": true, "distributedLogin": true, "automaticBan": true,
+		},
 	})
 }
 
@@ -1371,12 +1379,13 @@ func (a *app) handleFirewallAction(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !a.requireMaintenance(w, r) {
+	if !a.requireRole(w, r, "admin", "operator") || !a.requireMaintenance(w, r) {
 		return
 	}
 	var in struct {
-		Action, ID, Direction, Protocol, Source, Destination, RuleAction, Note string
-		Port                                                                   int
+		Action, ID, Direction, Protocol, Source, Destination, RuleAction, Note, Address, Reason string
+		Port                                                                                    int
+		DurationMinutes                                                                         int
 	}
 	if !decodeJSON(w, r, &in) {
 		return
@@ -1385,7 +1394,13 @@ func (a *app) handleFirewallAction(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 409, map[string]string{"error": "请先在应用商店安装 nftables"})
 		return
 	}
+	a.firewallActionMu.Lock()
+	defer a.firewallActionMu.Unlock()
 	rules := a.loadFirewallRules()
+	previousBlocks := a.loadSecurityBlocks()
+	actor := a.sessionUser(r)
+	var added, removed firewallRule
+	var block securityBlock
 	switch in.Action {
 	case "enable":
 	case "add":
@@ -1401,18 +1416,36 @@ func (a *app) handleFirewallAction(w http.ResponseWriter, r *http.Request) {
 		if destination == "" {
 			destination = "0.0.0.0/0"
 		}
-		if in.Port < 0 || in.Port > 65535 || !oneOf(direction, "in", "out") || !oneOf(strings.ToLower(in.Protocol), "tcp", "udp") ||
-			!oneOf(in.RuleAction, "allow", "deny") || !validSource(source) || !validSource(destination) || !sameAddressFamily(source, destination) {
-			writeJSON(w, 400, map[string]string{"error": "防火墙规则参数无效"})
+		protocol := strings.ToLower(strings.TrimSpace(in.Protocol))
+		ruleAction := strings.ToLower(strings.TrimSpace(in.RuleAction))
+		note := cleanNote(in.Note)
+		added = firewallRule{ID: randomToken(8), Direction: direction, Port: in.Port, Protocol: protocol, Source: source, Destination: destination, Action: ruleAction, Note: note, CreatedAt: time.Now(), CreatedBy: actor}
+		if err := validateNewFirewallRule(added); err != nil {
+			writeJSON(w, 400, map[string]string{"error": err.Error()})
 			return
 		}
-		rules = append(rules, firewallRule{ID: randomToken(8), Direction: direction, Port: in.Port, Protocol: strings.ToLower(in.Protocol), Source: source, Destination: destination, Action: in.RuleAction, Note: cleanNote(in.Note)})
+		for _, existing := range rules {
+			if sameFirewallRule(existing, added) {
+				writeJSON(w, http.StatusConflict, map[string]string{"error": "相同的防火墙规则已经存在"})
+				return
+			}
+		}
+		rules = append(rules, added)
 	case "delete":
+		found := false
 		for _, rule := range rules {
-			if rule.ID == in.ID && (rule.Direction == "" || rule.Direction == "in") && rule.Action == "allow" && rule.Protocol == "tcp" && rule.Port == sshPort() {
+			if rule.ID != in.ID {
+				continue
+			}
+			found, removed = true, rule
+			if (rule.Direction == "" || rule.Direction == "in") && rule.Action == "allow" && rule.Protocol == "tcp" && rule.Port == sshPort() && !hasAlternativeSSHRule(rules, rule) {
 				writeJSON(w, 400, map[string]string{"error": "不能删除当前 SSH 端口的保护规则，请先添加新的 SSH 放行规则"})
 				return
 			}
+		}
+		if !found {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "防火墙规则不存在"})
+			return
 		}
 		filtered := rules[:0]
 		for _, rule := range rules {
@@ -1421,41 +1454,134 @@ func (a *app) handleFirewallAction(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		rules = filtered
+	case "block":
+		duration := in.DurationMinutes
+		if duration == 0 {
+			duration = 60
+		}
+		var err error
+		block, _, err = a.upsertSecurityBlock(in.Address, in.Reason, time.Duration(duration)*time.Minute, actor)
+		if err != nil {
+			writeJSON(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+	case "unblock":
+		var err error
+		block, err = a.removeSecurityBlock(in.Address)
+		if errors.Is(err, os.ErrNotExist) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "封禁来源不存在或已经过期"})
+			return
+		}
+		if err != nil {
+			writeJSON(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
 	default:
 		writeJSON(w, 400, map[string]string{"error": "不支持的防火墙操作"})
 		return
 	}
 	if err := a.applyFirewallRules(rules); err != nil {
+		if in.Action == "block" || in.Action == "unblock" {
+			_ = a.replaceSecurityBlocks(previousBlocks)
+		}
+		a.audit(r, "firewall."+in.Action, in.ID, false, err.Error())
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
-	a.audit(r, "firewall."+in.Action, in.ID, true, fmt.Sprintf("%d rules", len(rules)))
+	now := time.Now()
+	switch in.Action {
+	case "add":
+		action := "firewall.rule_add"
+		if added.Direction == "in" && added.Action == "allow" {
+			action = "firewall.port_open"
+		}
+		a.audit(r, action, fmt.Sprintf("%s/%d", added.Protocol, added.Port), true, fmt.Sprintf("source=%s destination=%s purpose=%s opened=%s actor=%s", added.Source, added.Destination, added.Note, added.CreatedAt.Format(time.RFC3339), actor))
+	case "delete":
+		action := "firewall.rule_delete"
+		if removed.Direction == "in" && removed.Action == "allow" {
+			action = "firewall.port_close"
+		}
+		a.audit(r, action, fmt.Sprintf("%s/%d", removed.Protocol, removed.Port), true, fmt.Sprintf("purpose=%s opened=%s openedBy=%s closed=%s actor=%s", removed.Note, removed.CreatedAt.Format(time.RFC3339), removed.CreatedBy, now.Format(time.RFC3339), actor))
+	case "block":
+		a.audit(r, "security.source_block", block.Address, true, fmt.Sprintf("reason=%s expires=%s actor=%s", block.Reason, block.ExpiresAt.Format(time.RFC3339), actor))
+	case "unblock":
+		a.audit(r, "security.source_unblock", block.Address, true, fmt.Sprintf("reason=%s originalExpiry=%s actor=%s", block.Reason, block.ExpiresAt.Format(time.RFC3339), actor))
+	default:
+		a.audit(r, "firewall.enable", "inet tryallfun", true, fmt.Sprintf("%d rules; actor=%s", len(rules), actor))
+	}
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
 func (a *app) loadFirewallRules() []firewallRule {
 	path := filepath.Join(a.dataDir, "firewall.json")
 	var rules []firewallRule
+	info, statErr := os.Stat(path)
 	if b, err := os.ReadFile(path); err == nil {
 		_ = json.Unmarshal(b, &rules)
 	}
+	changed := false
+	now := time.Now()
 	if len(rules) == 0 {
 		rules = []firewallRule{
-			{ID: randomToken(8), Direction: "in", Port: sshPort(), Protocol: "tcp", Source: "0.0.0.0/0", Destination: "0.0.0.0/0", Action: "allow", Note: "SSH"},
-			{ID: randomToken(8), Direction: "in", Port: 80, Protocol: "tcp", Source: "0.0.0.0/0", Destination: "0.0.0.0/0", Action: "allow", Note: "HTTP"},
-			{ID: randomToken(8), Direction: "in", Port: 443, Protocol: "tcp", Source: "0.0.0.0/0", Destination: "0.0.0.0/0", Action: "allow", Note: "HTTPS"},
+			{ID: randomToken(8), Direction: "in", Port: sshPort(), Protocol: "tcp", Source: "0.0.0.0/0", Destination: "0.0.0.0/0", Action: "allow", Note: "SSH 远程管理（IPv4）", CreatedAt: now, CreatedBy: "system"},
+			{ID: randomToken(8), Direction: "in", Port: sshPort(), Protocol: "tcp", Source: "::/0", Destination: "::/0", Action: "allow", Note: "SSH 远程管理（IPv6）", CreatedAt: now, CreatedBy: "system"},
 		}
+		changed = true
+	}
+	legacyTime := now
+	if statErr == nil {
+		legacyTime = info.ModTime()
 	}
 	for i := range rules {
 		if rules[i].Direction == "" {
 			rules[i].Direction = "in"
+			changed = true
 		}
 		if rules[i].Source == "" {
 			rules[i].Source = "0.0.0.0/0"
+			changed = true
 		}
 		if rules[i].Destination == "" {
-			rules[i].Destination = "0.0.0.0/0"
+			if strings.Contains(rules[i].Source, ":") {
+				rules[i].Destination = "::/0"
+			} else {
+				rules[i].Destination = "0.0.0.0/0"
+			}
+			changed = true
 		}
+		if rules[i].Note == "" {
+			rules[i].Note = "历史规则（用途未记录）"
+			changed = true
+		}
+		if rules[i].CreatedAt.IsZero() {
+			rules[i].CreatedAt = legacyTime
+			changed = true
+		}
+		if rules[i].CreatedBy == "" {
+			rules[i].CreatedBy = "legacy"
+			changed = true
+		}
+	}
+	filtered := rules[:0]
+	for _, rule := range rules {
+		if !validStoredFirewallRule(rule) {
+			log.Printf("SECURITY firewall_rule_ignored id=%s reason=invalid_persisted_rule", truncate(rule.ID, 32))
+			changed = true
+			continue
+		}
+		filtered = append(filtered, rule)
+	}
+	rules = filtered
+	if len(rules) == 0 {
+		rules = []firewallRule{
+			{ID: randomToken(8), Direction: "in", Port: sshPort(), Protocol: "tcp", Source: "0.0.0.0/0", Destination: "0.0.0.0/0", Action: "allow", Note: "SSH 远程管理（IPv4）", CreatedAt: now, CreatedBy: "system"},
+			{ID: randomToken(8), Direction: "in", Port: sshPort(), Protocol: "tcp", Source: "::/0", Destination: "::/0", Action: "allow", Note: "SSH 远程管理（IPv6）", CreatedAt: now, CreatedBy: "system"},
+		}
+		changed = true
+	}
+	if changed {
+		data, _ := json.MarshalIndent(rules, "", "  ")
+		_ = atomicWrite(path, data, 0600)
 	}
 	return rules
 }
@@ -1463,22 +1589,9 @@ func (a *app) loadFirewallRules() []firewallRule {
 func (a *app) applyFirewallRules(rules []firewallRule) error {
 	a.firewallMu.Lock()
 	defer a.firewallMu.Unlock()
-	var b strings.Builder
-	b.WriteString("table inet tryallfun {\n chain input {\n  type filter hook input priority -10; policy drop;\n  ct state established,related accept\n  iifname \"lo\" accept\n  ip protocol icmp accept\n  ip6 nexthdr ipv6-icmp accept\n")
-	for _, rule := range rules {
-		if rule.Direction == "" || rule.Direction == "in" {
-			appendFirewallRule(&b, rule)
-		}
-	}
-	b.WriteString(" }\n chain output {\n  type filter hook output priority -10; policy accept;\n  ct state established,related accept\n  oifname \"lo\" accept\n")
-	for _, rule := range rules {
-		if rule.Direction == "out" {
-			appendFirewallRule(&b, rule)
-		}
-	}
-	b.WriteString(" }\n}\n")
+	config := buildFirewallConfig(rules, a.loadSecurityBlocks(), time.Now())
 	conf := filepath.Join(a.dataDir, "tryallfun-panel.nft")
-	transaction := b.String()
+	transaction := config
 	if nftTableExists() {
 		transaction = "delete table inet tryallfun\n" + transaction
 	}
@@ -1494,11 +1607,95 @@ func (a *app) applyFirewallRules(rules []firewallRule) error {
 	if out, err := runCommand(15*time.Second, "nft", "-f", applyConf); err != nil {
 		return errors.New(outOrErr(out, err))
 	}
-	if err := atomicWrite(conf, []byte(b.String()), 0600); err != nil {
+	if err := atomicWrite(conf, []byte(config), 0600); err != nil {
 		return err
 	}
 	data, _ := json.MarshalIndent(rules, "", "  ")
 	return atomicWrite(filepath.Join(a.dataDir, "firewall.json"), data, 0600)
+}
+
+func buildFirewallConfig(rules []firewallRule, blocks []securityBlock, now time.Time) string {
+	var b strings.Builder
+	b.WriteString("table inet tryallfun {\n")
+	appendBlockedSet(&b, "blocked_v4", "ipv4_addr", blocks, now, false)
+	appendBlockedSet(&b, "blocked_v6", "ipv6_addr", blocks, now, true)
+	b.WriteString(" chain input {\n  type filter hook input priority -10; policy drop;\n  ct state invalid counter drop\n  iifname \"lo\" accept\n  ip saddr @blocked_v4 counter drop\n  ip6 saddr @blocked_v6 counter drop\n  ct state established,related accept\n  tcp flags & (fin|syn|rst|psh|ack|urg) == 0 counter drop\n  tcp flags & (fin|syn|rst|psh|ack|urg) == fin|psh|urg counter drop\n  meta nfproto ipv4 tcp flags syn ct state new meter syn_rate_v4 { ip saddr timeout 1m limit rate over 40/second burst 80 packets } counter drop\n  meta nfproto ipv6 tcp flags syn ct state new meter syn_rate_v6 { ip6 saddr timeout 1m limit rate over 40/second burst 80 packets } counter drop\n  meta nfproto ipv4 meta l4proto udp ct state new meter udp_rate_v4 { ip saddr timeout 1m limit rate over 200/second burst 400 packets } counter drop\n  meta nfproto ipv6 meta l4proto udp ct state new meter udp_rate_v6 { ip6 saddr timeout 1m limit rate over 200/second burst 400 packets } counter drop\n  ct state new limit rate over 3000/second burst 6000 packets counter drop\n  icmp type echo-request limit rate over 20/second burst 40 packets counter drop\n  icmpv6 type echo-request limit rate over 20/second burst 40 packets counter drop\n  ip protocol icmp accept\n  ip6 nexthdr ipv6-icmp accept\n")
+	for _, rule := range rules {
+		if rule.Direction == "" || rule.Direction == "in" {
+			appendFirewallRule(&b, rule)
+		}
+	}
+	b.WriteString(" }\n chain output {\n  type filter hook output priority -10; policy accept;\n  ct state established,related accept\n  oifname \"lo\" accept\n")
+	for _, rule := range rules {
+		if rule.Direction == "out" {
+			appendFirewallRule(&b, rule)
+		}
+	}
+	b.WriteString(" }\n}\n")
+	return b.String()
+}
+
+func appendBlockedSet(b *strings.Builder, name, addressType string, blocks []securityBlock, now time.Time, ipv6 bool) {
+	elements := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		isIPv6 := strings.Contains(block.Address, ":")
+		if isIPv6 != ipv6 || !block.ExpiresAt.After(now) {
+			continue
+		}
+		seconds := max(1, int(block.ExpiresAt.Sub(now).Seconds()+0.999))
+		elements = append(elements, fmt.Sprintf("%s timeout %ds", block.Address, seconds))
+	}
+	fmt.Fprintf(b, " set %s {\n  type %s\n  flags timeout\n", name, addressType)
+	if len(elements) > 0 {
+		fmt.Fprintf(b, "  elements = { %s }\n", strings.Join(elements, ", "))
+	}
+	b.WriteString(" }\n")
+}
+
+func sameFirewallRule(a, b firewallRule) bool {
+	return a.Direction == b.Direction && a.Port == b.Port && a.Protocol == b.Protocol && a.Source == b.Source && a.Destination == b.Destination && a.Action == b.Action
+}
+
+func validateNewFirewallRule(rule firewallRule) error {
+	if !validStoredFirewallRule(rule) {
+		return errors.New("防火墙规则参数无效")
+	}
+	if rule.Direction == "in" && rule.Action == "allow" && rule.Port == 0 {
+		return errors.New("入站放行必须填写 1 到 65535 的具体端口")
+	}
+	if len([]rune(rule.Note)) < 3 {
+		return errors.New("必须填写至少 3 个字符的端口用途或规则备注")
+	}
+	return nil
+}
+
+func validStoredFirewallRule(rule firewallRule) bool {
+	return rule.Port >= 0 && rule.Port <= 65535 && oneOf(rule.Direction, "in", "out") && oneOf(rule.Protocol, "tcp", "udp") &&
+		oneOf(rule.Action, "allow", "deny") && validSource(rule.Source) && validSource(rule.Destination) && sameAddressFamily(rule.Source, rule.Destination)
+}
+
+func hasAlternativeSSHRule(rules []firewallRule, deleting firewallRule) bool {
+	family := addressFamily(deleting.Source)
+	for _, rule := range rules {
+		if rule.ID != deleting.ID && (rule.Direction == "" || rule.Direction == "in") && rule.Action == "allow" && rule.Protocol == "tcp" && rule.Port == deleting.Port && addressFamily(rule.Source) == family {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *app) recentSecurityEvents(limit int) []auditEntry {
+	entries := readRecentAuditEntries(filepath.Join(a.dataDir, "audit.jsonl"), 200)
+	result := make([]auditEntry, 0, limit)
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Action, "security.") || strings.HasPrefix(entry.Action, "firewall.") {
+			result = append(result, entry)
+			if len(result) >= limit {
+				break
+			}
+		}
+	}
+	return result
 }
 
 func nftTableExists() bool {
@@ -1513,7 +1710,7 @@ func appendFirewallRule(b *strings.Builder, rule firewallRule) {
 	if rule.Action == "deny" {
 		action = "drop"
 	}
-	var parts []string
+	parts := []string{"meta nfproto " + nftProtocolFamily(rule.Source)}
 	if expr := nftAddressExpr("saddr", rule.Source); expr != "" {
 		parts = append(parts, expr)
 	}
@@ -1566,6 +1763,13 @@ func addressFamily(s string) string {
 	return "ip"
 }
 
+func nftProtocolFamily(address string) string {
+	if addressFamily(address) == "ip6" {
+		return "ipv6"
+	}
+	return "ipv4"
+}
+
 func cleanNote(s string) string {
 	s = strings.Map(func(r rune) rune {
 		if r < 32 || r == '"' || r == '\\' {
@@ -1573,10 +1777,11 @@ func cleanNote(s string) string {
 		}
 		return r
 	}, s)
-	if len(s) > 60 {
-		s = s[:60]
+	runes := []rune(strings.TrimSpace(s))
+	if len(runes) > 60 {
+		runes = runes[:60]
 	}
-	return s
+	return string(runes)
 }
 
 func (a *app) handleTerminal(w http.ResponseWriter, r *http.Request) {
@@ -1611,12 +1816,14 @@ func (a *app) handleTerminal(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) handleSecurity(w http.ResponseWriter, _ *http.Request) {
 	tls := scanCertificates()
+	blocks := a.loadSecurityBlocks()
 	a.mu.RLock()
 	twoFactor := a.cfg.TOTPEnabled
 	a.mu.RUnlock()
 	writeJSON(w, 200, map[string]any{
 		"sshPort": sshPort(), "ssh": sshSettings(), "tls": tls,
 		"twoFactor": twoFactor, "audit": true, "score": securityScore(tls),
+		"intrusionProtection": true, "firewallEnabled": nftTableExists(), "blockedSources": len(blocks),
 	})
 }
 
@@ -1625,7 +1832,7 @@ func (a *app) handleSecurityAction(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !a.requireMaintenance(w, r) {
+	if !a.requireRole(w, r, "admin") || !a.requireMaintenance(w, r) {
 		return
 	}
 	var in struct {
@@ -1781,11 +1988,7 @@ func (a *app) handleAudit(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) audit(r *http.Request, action, target string, success bool, detail string) {
-	target, detail = safeAuditFields(action, target, detail)
-	entry := auditEntry{time.Now(), action, target, success, detail, clientIP(r)}
-	b, _ := json.Marshal(entry)
-	path := filepath.Join(a.dataDir, "audit.jsonl")
-	a.appendAuditLine(path, append(b, '\n'))
+	a.auditWithIP(action, target, success, detail, clientIP(r))
 }
 
 func (a *app) handleSettings(w http.ResponseWriter, r *http.Request) {

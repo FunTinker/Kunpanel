@@ -31,7 +31,7 @@ import (
 
 const (
 	addr              = "127.0.0.1:8088"
-	panelVersion      = "0.7.0"
+	panelVersion      = "0.8.0"
 	sessionMaxAge     = 12 * time.Hour
 	maintenanceMaxAge = 10 * time.Minute
 )
@@ -89,6 +89,8 @@ type app struct {
 	mu                   sync.RWMutex
 	auditMu              sync.Mutex
 	firewallMu           sync.Mutex
+	firewallActionMu     sync.Mutex
+	securityMu           sync.Mutex
 	sshMu                sync.Mutex
 	nodeMu               sync.RWMutex
 	nodeOpMu             sync.Mutex
@@ -139,6 +141,13 @@ func main() {
 	if err := a.loadConfig(); err != nil {
 		log.Fatal(err)
 	}
+	if len(os.Args) > 1 && os.Args[1] == "firewall" {
+		if err := a.firewallCLI(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	a.autoEnableFirewall()
 	if err := a.loadMetricHistory(); err != nil {
 		log.Printf("load metric history: %v", err)
 	}
@@ -325,9 +334,12 @@ func (a *app) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	key := clientIP(r)
-	if retry := a.loginRetryAfter(key); retry > 0 {
+	address := clientIP(r)
+	account := accountFingerprint(in.Username)
+	if retry, layer := a.loginBlockStatus(address, in.Username); retry > 0 {
 		w.Header().Set("Retry-After", strconv.Itoa(retry))
+		log.Printf("SECURITY auth_block client=%s account=%s layer=%s", address, account, layer)
+		a.audit(r, "security.auth_block", address, false, fmt.Sprintf("account=%s layer=%s retry=%ds", account, layer, retry))
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "登录失败次数过多，请稍后再试"})
 		return
 	}
@@ -337,11 +349,17 @@ func (a *app) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	if !ok {
 		time.Sleep(350 * time.Millisecond)
-		a.recordLoginFailure(key)
+		retry, layer := a.recordLoginFailure(address, in.Username)
+		log.Printf("SECURITY auth_failure client=%s account=%s", address, account)
+		a.audit(r, "security.auth_failure", address, false, fmt.Sprintf("account=%s layer=%s", account, layer))
+		if retry > 0 {
+			a.autoBlockLoginSource(address, layer)
+		}
 		writeJSON(w, 401, map[string]string{"error": "账号或密码错误"})
 		return
 	}
-	a.clearLoginFailures(key)
+	a.clearLoginFailures(address, in.Username)
+	a.audit(r, "security.auth_success", address, true, fmt.Sprintf("account=%s", account))
 	a.setSession(w, r, in.Username)
 	writeJSON(w, 200, map[string]any{"ok": true, "role": role})
 }

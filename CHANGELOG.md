@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.8.0 - 2026-08-29
+
+- Enable the KunPanel nftables table automatically at startup with an inbound default-deny policy and current SSH access only.
+- Detect single-source brute force, IPv4 `/24` and IPv6 `/64` rotation, cross-IP account spraying, and high-volume distributed login failures.
+- Persist expiring IPv4/IPv6 source bans and restore them atomically whenever the firewall is reloaded.
+- Drop invalid packets, TCP NULL/XMAS probes, abusive SYN and UDP source rates, and excessive global new connections before user allow rules.
+- Require a concrete port and purpose for every new inbound allow rule; record who opened and closed it and when.
+- Add manual source block/unblock controls, recent security events, protection status, and port lifecycle details to the firewall UI.
+- Add a bootstrap firewall CLI, a KunPanel Fail2ban filter/jail, and Linux CI validation with `nft -c`.
+
 ## v0.7.0 - 2026-08-29
 
 - Block SSRF through webhook and signed-upgrade URLs, including redirect and DNS resolution checks.

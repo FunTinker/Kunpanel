@@ -1,6 +1,6 @@
 # KunPanel 安装与使用手册
 
-本文适用于 KunPanel v0.7.x。当前版本建议以 **Beta** 方式公开使用：核心管理、权限、安全和回滚流程已有自动化测试与生产部署验证，但 KunPanel 会以 root 权限管理系统，不应在未备份、未配置 HTTPS 或没有服务商控制台救援能力的服务器上直接执行高风险操作。
+本文适用于 KunPanel v0.8.x。当前版本建议以 **Beta** 方式公开使用：核心管理、权限、安全和回滚流程已有自动化测试，nftables 规则已在 Debian Linux 通过实际语法检查，但 KunPanel 会以 root 权限管理系统，不应在未备份、未配置 HTTPS 或没有服务商控制台救援能力的服务器上直接执行高风险操作。
 
 ## 1. 支持范围
 
@@ -17,7 +17,7 @@
 
 ### 1.2 版本状态
 
-- v0.7.x 属于 Beta 版本。
+- v0.8.x 属于 Beta 版本。
 - Debian 12 是当前主要测试平台。
 - Ubuntu、Rocky Linux、AlmaLinux 等系统尚未完成完整兼容矩阵。
 - 节点 SSH 加固和端口迁移包含验证与回滚，但执行前仍必须准备云厂商控制台或串行控制台。
@@ -29,13 +29,13 @@
 
 将 `panel.example.com` 替换为自己的域名，并创建指向服务器公网 IP 的 A 或 AAAA 记录。
 
-在云厂商安全组和服务器防火墙中仅放行：
+在云厂商安全组中仅准备放行：
 
 - `22/tcp` 或实际 SSH 端口，只允许可信来源时更安全
 - `80/tcp`，用于首次签发证书和 HTTP 跳转
 - `443/tcp`，用于面板 HTTPS
 
-不要放行 `8088/tcp` 到公网。
+不要放行 `8088/tcp` 到公网。KunPanel 本机 nftables 在安装后默认只放行实际 SSH 端口；80、443 和业务端口需要按下文使用 CLI 或面板手工开放并填写用途。
 
 ### 2.2 安装基础依赖
 
@@ -43,14 +43,15 @@
 apt-get update
 apt-get install -y \
   ca-certificates curl git nginx certbot python3-certbot-nginx \
-  tmux nftables openssh-client sshpass zip unzip tar \
+  tmux nftables fail2ban openssh-client sshpass zip unzip tar \
   sudo procps iproute2 openssl
 ```
 
 说明：
 
 - `tmux` 用于 Web 终端。
-- `nftables` 用于防火墙管理。
+- `nftables` 用于默认拒绝、扫描限速和动态来源封禁。
+- `fail2ban` 是读取 systemd journal 的第二层登录防护；核心限流和封禁不依赖它。
 - `openssh-client` 和 `sshpass` 用于多 VPS 节点密钥下发。
 - 数据库、Docker、PHP、Redis、rclone 等按实际功能从应用商城安装。
 
@@ -119,7 +120,7 @@ install -d -m 0700 /etc/nginx/ssl
 | --- | --- | --- |
 | `/opt/kunpanel/source` | Git 源码 | root 可写 |
 | `/opt/kunpanel/kunpanel` | 生产二进制 | `0755` |
-| `/var/lib/tryallfun-panel` | 配置、会话、审计、指标、备份、SSH 私钥 | `0700` |
+| `/var/lib/tryallfun-panel` | 配置、会话、审计、指标、防火墙、封禁、备份、SSH 私钥 | `0700` |
 | `/home/wwwroot` | 网站和部署项目 | 按站点需要设置 |
 | `/etc/nginx/conf.d` | KunPanel 管理的 Nginx 站点配置 | root 可写 |
 | `/etc/nginx/ssl` | 证书文件 | `0700` 或更严格 |
@@ -132,9 +133,22 @@ install -d -m 0700 /etc/nginx/ssl
 install -m 0644 /opt/kunpanel/source/deploy/tryallfun-panel.service \
   /etc/systemd/system/kunpanel.service
 systemctl daemon-reload
-systemctl enable --now kunpanel
+systemctl enable kunpanel
+```
+
+首次启动前，使用 CLI 明确开放面板 HTTPS 端口并登记用途。需要通过 HTTP 完成首次证书签发时，再临时开放 80：
+
+```bash
+TAF_DATA_DIR=/var/lib/tryallfun-panel \
+  /opt/kunpanel/kunpanel firewall open tcp 443 "KunPanel HTTPS 管理入口"
+TAF_DATA_DIR=/var/lib/tryallfun-panel \
+  /opt/kunpanel/kunpanel firewall open tcp 80 "Let's Encrypt HTTP 验证"
+TAF_DATA_DIR=/var/lib/tryallfun-panel /opt/kunpanel/kunpanel firewall list
+systemctl start kunpanel
 systemctl status kunpanel --no-pager
 ```
+
+每次 `firewall open` 都会立即原子加载规则并写入用途、操作者和开启时间。证书签发完成后，应在面板“防火墙”页关闭不再需要的 80 端口；关闭时间和操作者同样写入审计。IPv6 公开服务需要额外传入 `::/0` 来源 CIDR。
 
 健康检查：
 
@@ -272,16 +286,36 @@ KunPanel 提供三种角色：
 
 ### 7.6 防火墙
 
-KunPanel 使用 nftables 管理独立的 `inet tryallfun` 表。
+KunPanel 使用 nftables 管理独立的 `inet tryallfun` 表。服务以 root 启动且已安装 nftables 时，默认自动加载以下策略：
+
+- 入站默认拒绝，仅自动保留当前 SSH 的 IPv4 和 IPv6 规则；不自动开放 80、443、8088 或业务端口。
+- 丢弃连接跟踪状态无效的数据包、TCP NULL/XMAS 异常标志和已经动态封禁的来源。
+- 按 IPv4/IPv6 来源限制 SYN 与 UDP 新连接速率，并使用高阈值限制全局新连接洪泛。
+- 登录同时按单 IP、IPv4 `/24`、IPv6 `/64`、账号指纹和全局失败量限流，阻断密码爆破和多 IP 轮询喷洒。
+- 达到阈值的公网来源自动封禁 30 分钟；回环、私网、运营商 NAT 地址和当前活跃 SSH 连接来源不会被自动加入 nftables 封禁集合。
+
+开放入口端口必须填写 1 到 65535 的具体端口和至少 3 个字符的用途。规则列表展示来源、目标、开启人和开启时间；关闭时审计保留原用途和整个生命周期。安全事件列表同时展示登录阻断、自动封禁、手工封禁和端口开关记录。
 
 添加规则前：
 
 1. 在云厂商控制台确认有救援入口。
 2. 保留当前 SSH 管理端口。
 3. 区分入口和出口、TCP 和 UDP、来源 CIDR 和目标 CIDR。
-4. 先添加允许规则，再添加拒绝规则。
+4. 限定可信来源 CIDR 能显著减少公开攻击面。
 
 面板规则不能替代云安全组，两者必须同时允许流量。
+
+Fail2ban 作为可选第二层防护安装：
+
+```bash
+install -m 0644 /opt/kunpanel/source/deploy/fail2ban/filter.d/kunpanel-auth.conf \
+  /etc/fail2ban/filter.d/kunpanel-auth.conf
+install -m 0644 /opt/kunpanel/source/deploy/fail2ban/jail.d/kunpanel-auth.conf \
+  /etc/fail2ban/jail.d/kunpanel-auth.conf
+fail2ban-client -t
+systemctl enable --now fail2ban
+fail2ban-client status kunpanel-auth
+```
 
 ### 7.7 系统工具
 
@@ -346,7 +380,7 @@ Web 终端由 tmux 保持会话，可在浏览器断线后恢复。
 - 启用主管理员 TOTP。
 - 创建日常操作员账号，减少主管理员日常使用。
 - 检查 SSH 密钥认证和密码策略。
-- 配置 Fail2ban。
+- 检查 KunPanel 动态封禁并启用专用 Fail2ban jail。
 - 查看最近登录失败和操作审计。
 - 检查防火墙只开放必要端口。
 - 定期导出离线备份并验证恢复。
@@ -454,6 +488,7 @@ sh scripts/reset-password.sh
 | `TAF_NGINX_SSL_DIR` | 模板为 `/etc/nginx/ssl` | 证书目录 |
 | `TAF_ALLOW_INSECURE_COOKIES` | 不设置 | 仅本地 HTTP 开发可设为 `1`，生产环境禁止启用 |
 | `TAF_ALLOW_PRIVATE_OUTBOUND` | 不设置 | 仅确需访问可信内网 Webhook/升级源时设为 `1`，启用后会放宽 SSRF 防护 |
+| `TAF_FIREWALL_AUTO_ENABLE` | `1` | 启动时自动恢复默认拒绝和动态封禁；仅紧急救援时临时设为 `0` |
 
 修改 systemd 环境变量后执行：
 
@@ -510,7 +545,18 @@ apt-get install -y openssh-client sshpass
 
 依次检查云安全组、本机 nftables/ufw/firewalld、`sshd -t`、`sshd -T`、监听端口和服务日志。不要关闭仍可用的旧 SSH 会话。
 
-### 12.6 应用安装失败
+### 12.6 防火墙启用后页面不可达
+
+先通过服务商控制台或仍然有效的 SSH 会话检查规则和已登记端口：
+
+```bash
+nft list table inet tryallfun
+TAF_DATA_DIR=/var/lib/tryallfun-panel /opt/kunpanel/kunpanel firewall list
+```
+
+缺少 HTTPS 规则时，使用带用途的 CLI 命令开放 443。只有规则文件损坏且 CLI 无法修复时，才在 systemd 服务中临时设置 `TAF_FIREWALL_AUTO_ENABLE=0` 并从服务商控制台恢复；该开关不会主动删除已加载的 nftables 表，也不应长期关闭。
+
+### 12.7 应用安装失败
 
 - 查看任务输出中的第一条失败命令。
 - 确认 Debian 软件源可访问。

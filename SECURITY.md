@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Security fixes are applied to the latest v0.7.x release line. Older builds may
+Security fixes are applied to the latest v0.8.x release line. Older builds may
 receive no fixes and should be upgraded after reviewing release notes and
 making a verified backup.
 
@@ -31,3 +31,8 @@ audit logs after maintenance tasks.
 
 Do not run SSH port migration or password-login disabling without an existing
 key-authenticated session and provider console access.
+
+KunPanel v0.8 enables an inbound default-deny nftables table at startup. Before
+upgrading, register every required public port with a purpose, keep the active
+SSH port allowed, and retain provider-console access. `TAF_FIREWALL_AUTO_ENABLE=0`
+is an emergency recovery switch, not a normal production setting.

@@ -17,6 +17,7 @@ Environment=TAF_SERVICE_NAME=kunpanel
 Environment=TAF_HEALTH_URL=http://127.0.0.1:8088
 Environment=TAF_NGINX_VHOST_DIR=/etc/nginx/conf.d
 Environment=TAF_NGINX_SSL_DIR=/etc/nginx/ssl
+Environment=TAF_FIREWALL_AUTO_ENABLE=1
 UMask=0077
 Restart=on-failure
 RestartSec=3

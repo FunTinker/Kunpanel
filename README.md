@@ -4,7 +4,7 @@ KunPanel 是面向 Debian 12 的自由、私有 VPS 管理面板。无需手机�
 
 项目完整源代码以 [Apache License 2.0](LICENSE) 开源，公开仓库为 <https://github.com/FunTinker/Kunpanel>。
 
-> **版本状态：Beta。** v0.7.x 已完成自动化测试、浏览器验收和 Debian 12 生产部署，但面板会以 root 权限执行系统管理操作。上线前必须配置 HTTPS、访问控制、离线备份和服务商控制台救援能力。
+> **版本状态：Beta。** v0.8.x 已完成自动化测试和 Debian 12 nftables 语法验收，但面板会以 root 权限执行系统管理操作。上线前必须配置 HTTPS、访问控制、离线备份和服务商控制台救援能力。
 
 ## 文档
 
@@ -14,8 +14,14 @@ KunPanel 是面向 Debian 12 的自由、私有 VPS 管理面板。无需手机�
 - [安全策略](SECURITY.md)
 - [参与贡献](CONTRIBUTING.md)
 
-## v0.7.0 功能
+## v0.8.0 功能
 
+- 默认防火墙：安装后自动加载 nftables 入站默认拒绝策略，只预留当前 SSH，其他端口必须手工登记用途后开放
+- 扫描与洪泛防护：丢弃无效连接和 TCP NULL/XMAS 探测，限制单源 SYN、UDP 及全局新连接速率
+- 爆破联防：同时识别单 IP、IPv4 `/24`、IPv6 `/64`、跨 IP 账号喷洒和高流量分布式失败
+- 动态封禁：公网攻击源自动加入带超时的 IPv4/IPv6 集合，跳过当前活跃 SSH 来源，并支持手工封禁、解封和重启恢复
+- 端口审计：记录用途、开启人、开启时间、关闭人和关闭时间，并在安全事件中统一检索
+- 纵深防御：提供 KunPanel 专用 Fail2ban journal 过滤器，核心防护不依赖 Fail2ban
 - 安全外连：Webhook 与签名升级只允许受控 HTTPS，阻止私网、回环、链路本地、DNS 重绑定和重定向绕过
 - 文件安全：归档解压使用操作系统级目录根约束，拒绝 Zip Slip、归档符号链接及预置链接逃逸
 - 会话安全：Cookie 默认强制 Secure，代理协议头仅信任本机代理，密码和角色变更会精确失效目标用户会话
@@ -87,9 +93,9 @@ sh scripts/reset-password.sh
 
 ```bash
 go run ./cmd/sign-update keygen
-go run ./cmd/sign-update sign kunpanel-update-private.key v0.7.0 \
-  https://updates.example.com/kunpanel-v0.7.0 \
-  ./kunpanel-v0.7.0 "安全与稳定性更新" > manifest.json
+go run ./cmd/sign-update sign kunpanel-update-private.key v0.8.0 \
+  https://updates.example.com/kunpanel-v0.8.0 \
+  ./kunpanel-v0.8.0 "入侵防护与端口审计更新" > manifest.json
 ```
 
 只需把二进制和 `manifest.json` 放到 HTTPS 静态源，并在面板设置中填写 Manifest URL 与公钥。私钥不得上传服务器或提交到仓库。
