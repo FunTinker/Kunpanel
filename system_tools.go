@@ -156,7 +156,7 @@ func (a *app) handleSystemLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	unit := r.URL.Query().Get("unit")
 	if unit == "" {
-		unit = "tryallfun-panel"
+		unit = env("TAF_SERVICE_NAME", "kunpanel")
 	}
 	if !knownLogUnit(unit) {
 		writeJSON(w, 400, map[string]string{"error": "不支持的日志单元"})
@@ -175,7 +175,7 @@ func (a *app) handleSystemLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func knownLogUnit(unit string) bool {
-	if unit == "tryallfun-panel" {
+	if unit == "tryallfun-panel" || unit == "kunpanel" || unit == env("TAF_SERVICE_NAME", "kunpanel") {
 		return true
 	}
 	return knownService(unit)
@@ -228,6 +228,26 @@ func (a *app) handleDocker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet {
+		if id := r.URL.Query().Get("id"); id != "" {
+			if !safeNameRE.MatchString(id) || !oneOf(r.URL.Query().Get("view"), "logs", "inspect") {
+				writeJSON(w, 400, map[string]string{"error": "容器或视图无效"})
+				return
+			}
+			if r.URL.Query().Get("view") == "logs" && !a.requireRole(w, r, "admin", "operator") {
+				return
+			}
+			args := []string{"logs", "--tail", "200", "--timestamps", id}
+			if r.URL.Query().Get("view") == "inspect" {
+				args = []string{"inspect", "--format", "{{json .State}}", id}
+			}
+			out, err := runCommand(20*time.Second, "docker", args...)
+			if err != nil {
+				writeJSON(w, 500, map[string]string{"error": outOrErr(out, err)})
+				return
+			}
+			writeJSON(w, 200, map[string]string{"output": out})
+			return
+		}
 		containers, containerErr := dockerJSONLines("ps", "-a", "--format", "{{json .}}")
 		images, imageErr := dockerJSONLines("images", "--format", "{{json .}}")
 		if containerErr != nil || imageErr != nil {

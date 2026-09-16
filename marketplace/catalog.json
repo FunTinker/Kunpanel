@@ -1,0 +1,309 @@
+[
+  {
+    "id": "uptime-kuma",
+    "name": "Uptime Kuma",
+    "desc": "网站、接口与服务可用性监控",
+    "category": "监控",
+    "repo": "louislam/uptime-kuma",
+    "image": "louislam/uptime-kuma:2",
+    "port": 3001,
+    "defaultPort": 18101,
+    "volumes": [
+      "data:/app/data"
+    ],
+    "memory": "512m",
+    "license": "MIT",
+    "stars": 91402,
+    "starsChecked": "2026-09-15"
+  },
+  {
+    "id": "vaultwarden",
+    "name": "Vaultwarden",
+    "desc": "兼容 Bitwarden 的个人密码保险库",
+    "category": "安全",
+    "repo": "dani-garcia/vaultwarden",
+    "image": "vaultwarden/server:latest",
+    "port": 80,
+    "defaultPort": 18102,
+    "volumes": [
+      "data:/data"
+    ],
+    "environment": {
+      "SIGNUPS_ALLOWED": "false"
+    },
+    "memory": "256m",
+    "license": "AGPL-3.0",
+    "note": "默认关闭注册；请通过服务器配置邀请或开放首次注册。浏览器密码库需要 HTTPS。",
+    "stars": 67672,
+    "starsChecked": "2026-09-15"
+  },
+  {
+    "id": "gitea",
+    "name": "Gitea",
+    "desc": "Git 仓库、工单与团队协作，内置 SQLite",
+    "category": "开发工具",
+    "repo": "go-gitea/gitea",
+    "image": "gitea/gitea:1",
+    "port": 3000,
+    "defaultPort": 18103,
+    "volumes": [
+      "data:/data"
+    ],
+    "environment": {
+      "GITEA__database__DB_TYPE": "sqlite3",
+      "GITEA__server__DISABLE_SSH": "true"
+    },
+    "memory": "512m",
+    "license": "MIT",
+    "note": "当前适配 HTTPS Git；容器 SSH 服务默认关闭。首次访问完成管理员初始化。",
+    "stars": 57991,
+    "starsChecked": "2026-09-15"
+  },
+  {
+    "id": "n8n",
+    "name": "n8n",
+    "desc": "可视化工作流与自动化集成",
+    "category": "自动化",
+    "repo": "n8n-io/n8n",
+    "image": "docker.n8n.io/n8nio/n8n:stable",
+    "port": 5678,
+    "defaultPort": 18104,
+    "volumes": [
+      "data:/home/node/.n8n"
+    ],
+    "environment": {
+      "N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS": "true",
+      "N8N_DIAGNOSTICS_ENABLED": "false"
+    },
+    "memory": "1g",
+    "license": "Sustainable Use License",
+    "note": "通过 HTTPS 反向代理访问；授权条款限制部分商业托管用途。",
+    "stars": 204434,
+    "starsChecked": "2026-09-15"
+  },
+  {
+    "id": "it-tools",
+    "name": "IT-Tools",
+    "desc": "编码、转换、加密摘要等开发者工具集",
+    "category": "开发工具",
+    "repo": "CorentinTh/it-tools",
+    "image": "corentinth/it-tools:latest",
+    "port": 80,
+    "defaultPort": 18105,
+    "volumes": [],
+    "memory": "128m",
+    "license": "GPL-3.0",
+    "stars": 40601,
+    "starsChecked": "2026-09-15"
+  },
+  {
+    "id": "homepage",
+    "name": "Homepage",
+    "desc": "可配置的自托管服务导航与状态看板",
+    "category": "运维工具",
+    "repo": "gethomepage/homepage",
+    "image": "ghcr.io/gethomepage/homepage:latest",
+    "port": 3000,
+    "defaultPort": 18106,
+    "volumes": [
+      "config:/app/config"
+    ],
+    "environment": {
+      "HOMEPAGE_ALLOWED_HOSTS": "*"
+    },
+    "memory": "256m",
+    "license": "GPL-3.0",
+    "note": "配置存储在独立 Docker 卷，未挂载 Docker socket。",
+    "stars": 32647,
+    "starsChecked": "2026-09-15"
+  },
+  {
+    "id": "actual-budget",
+    "name": "Actual Budget",
+    "desc": "个人记账、预算与端到端加密同步",
+    "category": "效率工具",
+    "repo": "actualbudget/actual",
+    "image": "actualbudget/actual-server:latest",
+    "port": 5006,
+    "defaultPort": 18107,
+    "volumes": [
+      "data:/data"
+    ],
+    "memory": "512m",
+    "license": "MIT",
+    "stars": 28888,
+    "starsChecked": "2026-09-15"
+  },
+  {
+    "id": "stirling-pdf",
+    "name": "Stirling PDF",
+    "desc": "PDF 拆分、合并、转换和文档处理",
+    "category": "效率工具",
+    "repo": "Stirling-Tools/Stirling-PDF",
+    "image": "stirlingtools/stirling-pdf:latest",
+    "port": 8080,
+    "defaultPort": 18108,
+    "volumes": [
+      "configs:/configs",
+      "data:/usr/share/tessdata",
+      "logs:/logs"
+    ],
+    "environment": {
+      "SECURITY_ENABLELOGIN": "true"
+    },
+    "memory": "2g",
+    "license": "MIT",
+    "note": "首次登录后修改管理员凭据；完整镜像体积较大。",
+    "stars": 92222,
+    "starsChecked": "2026-09-15"
+  },
+  {
+    "id": "open-webui",
+    "name": "Open WebUI",
+    "desc": "兼容 Ollama 和 OpenAI 接口的 AI 对话界面",
+    "category": "人工智能",
+    "repo": "open-webui/open-webui",
+    "image": "ghcr.io/open-webui/open-webui:main",
+    "port": 8080,
+    "defaultPort": 18109,
+    "volumes": [
+      "data:/app/backend/data"
+    ],
+    "environment": {
+      "ENABLE_SIGNUP": "true"
+    },
+    "memory": "2g",
+    "license": "Open WebUI License",
+    "note": "不下载模型，不挂载 GPU；在应用设置中配置模型服务。首次注册成为管理员后关闭公开注册。",
+    "stars": 152201,
+    "starsChecked": "2026-09-15"
+  },
+  {
+    "id": "changedetection",
+    "name": "Changedetection.io",
+    "desc": "网页内容变化监测与通知",
+    "category": "监控",
+    "repo": "dgtlmoon/changedetection.io",
+    "image": "ghcr.io/dgtlmoon/changedetection.io:latest",
+    "port": 5000,
+    "defaultPort": 18110,
+    "volumes": [
+      "data:/datastore"
+    ],
+    "memory": "512m",
+    "license": "Apache-2.0",
+    "note": "默认使用 HTTP 抓取，浏览器渲染需自行配置外部浏览器服务。",
+    "stars": 34230,
+    "starsChecked": "2026-09-15"
+  },
+  {
+    "id": "freshrss",
+    "name": "FreshRSS",
+    "desc": "RSS 订阅聚合与阅读，支持 SQLite",
+    "category": "效率工具",
+    "repo": "FreshRSS/FreshRSS",
+    "image": "freshrss/freshrss:latest",
+    "port": 80,
+    "defaultPort": 18111,
+    "volumes": [
+      "data:/var/www/FreshRSS/data",
+      "extensions:/var/www/FreshRSS/extensions"
+    ],
+    "environment": {
+      "TZ": "Asia/Shanghai",
+      "CRON_MIN": "*/20"
+    },
+    "memory": "256m",
+    "license": "AGPL-3.0",
+    "stars": 16029,
+    "starsChecked": "2026-09-15"
+  },
+  {
+    "id": "linkding",
+    "name": "linkding",
+    "desc": "个人书签、标签与网页归档管理",
+    "category": "效率工具",
+    "repo": "sissbruecker/linkding",
+    "image": "sissbruecker/linkding:latest",
+    "port": 9090,
+    "defaultPort": 18112,
+    "volumes": [
+      "data:/etc/linkding/data"
+    ],
+    "memory": "512m",
+    "license": "MIT",
+    "note": "安装详情提供一次性管理员凭据；首次登录后修改密码。",
+    "stars": 11186,
+    "starsChecked": "2026-09-15"
+  },
+  {
+    "id": "memos",
+    "name": "Memos",
+    "desc": "轻量笔记、知识记录与分享",
+    "category": "效率工具",
+    "repo": "usememos/memos",
+    "image": "neosmemo/memos:stable",
+    "port": 5230,
+    "defaultPort": 18113,
+    "volumes": [
+      "data:/var/opt/memos"
+    ],
+    "memory": "256m",
+    "license": "MIT",
+    "stars": 63082,
+    "starsChecked": "2026-09-15"
+  },
+  {
+    "id": "kavita",
+    "name": "Kavita",
+    "desc": "电子书、漫画与文档阅读管理",
+    "category": "媒体工具",
+    "repo": "Kareadita/Kavita",
+    "image": "jvmilazz0/kavita:latest",
+    "port": 5000,
+    "defaultPort": 18114,
+    "volumes": [
+      "config:/kavita/config",
+      "books:/books"
+    ],
+    "memory": "512m",
+    "license": "GPL-3.0",
+    "stars": 11682,
+    "starsChecked": "2026-09-15"
+  },
+  {
+    "id": "jellyfin",
+    "name": "Jellyfin",
+    "desc": "个人媒体库与音视频串流",
+    "category": "媒体工具",
+    "repo": "jellyfin/jellyfin",
+    "image": "jellyfin/jellyfin:latest",
+    "port": 8096,
+    "defaultPort": 18115,
+    "volumes": [
+      "config:/config",
+      "cache:/cache",
+      "media:/media"
+    ],
+    "memory": "1g",
+    "license": "GPL-2.0",
+    "note": "基础 CPU 模式，媒体导入独立卷；硬件转码需另行配置设备映射。",
+    "stars": 57169,
+    "starsChecked": "2026-09-15"
+  },
+  {
+    "id": "whoami",
+    "name": "Whoami",
+    "desc": "HTTP 请求与反向代理诊断服务",
+    "category": "运维工具",
+    "repo": "traefik/whoami",
+    "image": "traefik/whoami:v1.11",
+    "port": 80,
+    "defaultPort": 18116,
+    "volumes": [],
+    "memory": "64m",
+    "license": "MIT",
+    "stars": 1418,
+    "starsChecked": "2026-09-15"
+  }
+]

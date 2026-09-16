@@ -94,6 +94,9 @@ type app struct {
 	sshMu                sync.Mutex
 	nodeMu               sync.RWMutex
 	nodeOpMu             sync.Mutex
+	deploymentMu         sync.Mutex
+	marketplaceMu        sync.Mutex
+	scheduleMu           sync.Mutex
 	cfg                  config
 	cfgPath              string
 	dataDir              string

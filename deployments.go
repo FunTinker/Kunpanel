@@ -55,6 +55,8 @@ func (a *app) handleDeployments(w http.ResponseWriter, r *http.Request) {
 	if !a.requireMaintenance(w, r) {
 		return
 	}
+	a.deploymentMu.Lock()
+	defer a.deploymentMu.Unlock()
 	var in struct {
 		Action  string `json:"action"`
 		ID      string `json:"id"`
@@ -80,11 +82,15 @@ func (a *app) handleDeployments(w http.ResponseWriter, r *http.Request) {
 		if branch == "" {
 			branch = "main"
 		}
-		if !safeNameRE.MatchString(branch) {
+		if !validGitBranch(branch) {
 			writeJSON(w, 400, map[string]string{"error": "Git 分支名无效"})
 			return
 		}
 		dir := filepath.Join(a.deploymentsDir(), in.ID, "source")
+		if fileExists(filepath.Join(a.deploymentsDir(), in.ID+".json")) || fileExists(dir) {
+			writeJSON(w, 409, map[string]string{"error": "项目已存在"})
+			return
+		}
 		if _, err := safePath(a.deploymentsDir(), dir); err != nil {
 			writeJSON(w, 400, map[string]string{"error": "部署目录无效"})
 			return
@@ -127,6 +133,10 @@ func (a *app) handleDeployments(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 400, map[string]string{"error": "Compose 文件为空或超过 512 KB"})
 			return
 		}
+		if err := validateCompose(in.Compose); err != nil {
+			writeJSON(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
 		item := deploymentProject{ID: in.ID, Name: cleanNote(in.Name), Repo: in.Repo, Branch: in.Branch, Compose: in.Compose, Created: time.Now(), Updated: time.Now()}
 		if item.Name == "" {
 			item.Name = item.ID
@@ -154,7 +164,14 @@ func (a *app) handleDeployments(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 400, map[string]string{"error": "Compose 文件为空或超过 512 KB"})
 			return
 		}
+		if err := validateCompose(in.Compose); err != nil {
+			writeJSON(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
 		item.Compose, item.Updated = in.Compose, time.Now()
+		if strings.TrimSpace(in.Name) != "" {
+			item.Name = cleanNote(in.Name)
+		}
 		if err := a.writeDeployment(item); err != nil {
 			writeJSON(w, 500, map[string]string{"error": err.Error()})
 			return
@@ -167,7 +184,18 @@ func (a *app) handleDeployments(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 400, map[string]string{"error": "删除确认文本不正确"})
 			return
 		}
+		if fileExists(composePath) {
+			out, err := runCommand(2*time.Minute, "docker", "compose", "-f", composePath, "down")
+			if err != nil {
+				writeJSON(w, 500, map[string]string{"error": "停止容器失败，项目已保留: " + outOrErr(out, err)})
+				return
+			}
+		}
 		if err := os.RemoveAll(dir); err != nil {
+			writeJSON(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := os.Remove(filepath.Join(a.deploymentsDir(), item.ID+".json")); err != nil && !os.IsNotExist(err) {
 			writeJSON(w, 500, map[string]string{"error": err.Error()})
 			return
 		}
@@ -240,7 +268,7 @@ func (a *app) writeDeployment(item deploymentProject) error {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(dir, "docker-compose.yml"), []byte(item.Compose), 0600); err != nil {
+	if err := atomicWrite(filepath.Join(dir, "docker-compose.yml"), []byte(item.Compose), 0600); err != nil {
 		return err
 	}
 	return a.writeDeploymentMeta(item)
@@ -254,7 +282,22 @@ func (a *app) writeDeploymentMeta(item deploymentProject) error {
 	if err := os.MkdirAll(a.deploymentsDir(), 0700); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(a.deploymentsDir(), item.ID+".json"), b, 0600)
+	return atomicWrite(filepath.Join(a.deploymentsDir(), item.ID+".json"), b, 0600)
+}
+
+func validGitBranch(branch string) bool {
+	return len(branch) <= 200 && branch != "" && !strings.HasPrefix(branch, "-") && !strings.HasPrefix(branch, "/") && !strings.HasSuffix(branch, "/") && !strings.HasSuffix(branch, ".") && !strings.HasSuffix(branch, ".lock") && !strings.Contains(branch, "..") && !strings.Contains(branch, "//") && !strings.Contains(branch, "@{") && !strings.ContainsAny(branch, " ~^:?*[\\\r\n\t\x00")
+}
+
+func validateCompose(content string) error {
+	if !commandExists("docker") {
+		return errors.New("请先安装 Docker Compose")
+	}
+	out, err := runCommandInput(20*time.Second, content, "docker", "compose", "-f", "-", "config", "--quiet")
+	if err != nil {
+		return fmt.Errorf("Compose 配置无效: %s", outOrErr(out, err))
+	}
+	return nil
 }
 
 func validGitURL(raw string) bool {

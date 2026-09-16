@@ -1,0 +1,27 @@
+[Unit]
+Description=KunPanel Server Management Panel
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/hoem/wwwroot/kunpanel
+ExecStart=/hoem/wwwroot/kunpanel/kunpanel
+Environment=TAF_ADDR=127.0.0.1:18088
+Environment=TAF_DATA_DIR=/hoem/wwwroot/kunpanel/data
+Environment=TAF_FILE_ROOT=/home/wwwroot
+Environment=TAF_PROJECT_DIR=/hoem/wwwroot/kunpanel
+Environment=TAF_BINARY_PATH=/hoem/wwwroot/kunpanel/kunpanel
+Environment=TAF_SERVICE_NAME=kunpanel
+Environment=TAF_HEALTH_URL=http://127.0.0.1:18088
+Environment=TAF_NGINX_VHOST_DIR=/etc/nginx/conf.d
+Environment=TAF_NGINX_SSL_DIR=/hoem/wwwroot/kunpanel/ssl
+Environment=TAF_FIREWALL_AUTO_ENABLE=0
+UMask=0077
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

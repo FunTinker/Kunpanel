@@ -46,6 +46,9 @@ func (a *app) allCatalog() []appSpec {
 
 func (a *app) appCatalog() []map[string]any {
 	out := appCatalog()
+	for _, item := range marketplaceCatalog() {
+		out = append(out, a.marketplaceInfo(item, false))
+	}
 	for _, spec := range a.customSpecs() {
 		installed := appInstalled(spec)
 		out = append(out, map[string]any{
@@ -162,7 +165,18 @@ func (a *app) handleAppRegistry(w http.ResponseWriter, r *http.Request) {
 	if file.Version == "" {
 		file.Version = "1"
 	}
+	if len(file.Apps) > 100 {
+		writeJSON(w, 400, map[string]string{"error": "应用清单最多包含 100 个应用"})
+		return
+	}
 	seen := map[string]bool{}
+	for _, spec := range catalog() {
+		seen[spec.ID] = true
+	}
+	seen["wordpress"] = true
+	for _, spec := range marketplaceCatalog() {
+		seen[spec.ID] = true
+	}
 	for _, manifest := range file.Apps {
 		if seen[manifest.ID] {
 			writeJSON(w, 400, map[string]string{"error": "应用 ID 重复"})

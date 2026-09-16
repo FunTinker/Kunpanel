@@ -149,10 +149,32 @@ func catalog() []appSpec {
 		packageApp("laravel", "Laravel 运行环境", "Laravel 所需 PHP 扩展、Composer 与进程守护", "建站", "10/11", "L", "https://laravel.com/", "MIT", []string{"Laravel", "PHP", "队列"}, []string{"php8.2-cli", "php8.2-mbstring", "php8.2-xml", "php8.2-curl", "php8.2-zip", "composer", "supervisor"}, []string{"php", "composer"}),
 		packageApp("postfix", "Postfix", "SMTP 邮件发送服务，适合站点通知和系统邮件", "网络服务", "3.x", "M", "http://www.postfix.org/", "EPL-2.0", []string{"邮件", "SMTP", "通知"}, []string{"postfix"}, []string{"postfix"}),
 	)
+	for index := range apps {
+		if apps[index].ID == "docker" {
+			apps[index].Desc, apps[index].Version, apps[index].Source = "Docker 官方 Engine 与 Compose v2 插件", "官方稳定版", "Docker 官方 Debian 仓库"
+			apps[index].Commands = []string{dockerInstallScript}
+			apps[index].Update = []string{dockerInstallScript}
+			apps[index].Remove = []string{"DEBIAN_FRONTEND=noninteractive apt-get purge -y docker-ce docker-ce-cli docker-buildx-plugin docker-compose-plugin"}
+			apps[index].Checks = []string{"docker", "compose:v2"}
+		}
+	}
+	apps = append(apps,
+		packageApp("nginx", "Nginx", "HTTP 服务与反向代理", "网络服务", "Debian stable", "N", "https://nginx.org", "BSD-2-Clause", []string{"HTTP", "反向代理"}, []string{"nginx"}, nil),
+		packageApp("apache", "Apache HTTP Server", "通用 HTTP 服务", "网络服务", "2.4", "A", "https://httpd.apache.org", "Apache-2.0", []string{"HTTP"}, []string{"apache2"}, nil),
+		packageApp("caddy", "Caddy", "自动 HTTPS 的 Web 服务", "网络服务", "Debian stable", "C", "https://caddyserver.com", "Apache-2.0", []string{"HTTPS", "反向代理"}, []string{"caddy"}, nil),
+		packageApp("mariadb", "MariaDB", "兼容 MySQL 的关系型数据库", "数据库", "10.11", "M", "https://mariadb.org", "GPL-2.0", []string{"SQL"}, []string{"mariadb-server"}, nil),
+		packageApp("adminer", "Adminer", "单文件数据库管理工具", "建站", "Debian stable", "A", "https://www.adminer.org", "Apache-2.0", []string{"数据库", "PHP"}, []string{"adminer"}, nil),
+		packageApp("rclone", "Rclone", "对象存储、网盘与远程备份客户端", "备份工具", "Debian stable", "R", "https://rclone.org", "MIT", []string{"备份", "对象存储"}, []string{"rclone"}, nil),
+		packageApp("tmux", "Tmux", "面板在线终端的会话运行依赖", "运维工具", "Debian stable", "T", "https://github.com/tmux/tmux", "ISC", []string{"终端"}, []string{"tmux"}, nil),
+	)
 	return apps
 }
 
 func packageApp(id, name, desc, category, version, icon, homepage, license string, tags, packages, checks []string) appSpec {
+	checks = make([]string, 0, len(packages))
+	for _, name := range packages {
+		checks = append(checks, "package:"+name)
+	}
 	install := []string{"apt-get update", fmt.Sprintf("DEBIAN_FRONTEND=noninteractive apt-get install -y %s", strings.Join(packages, " "))}
 	remove := []string{fmt.Sprintf("DEBIAN_FRONTEND=noninteractive apt-get purge -y %s", strings.Join(packages, " ")), "apt-get autoremove -y"}
 	update := []string{"apt-get update", fmt.Sprintf("DEBIAN_FRONTEND=noninteractive apt-get install --only-upgrade -y %s", strings.Join(packages, " "))}
@@ -187,6 +209,10 @@ func (a *app) handleAppDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.URL.Query().Get("id")
+	if item, ok := marketplaceByID(id); ok {
+		writeJSON(w, 200, a.marketplaceInfo(item, true))
+		return
+	}
 	if id == "wordpress" {
 		writeJSON(w, 200, map[string]any{
 			"id": "wordpress", "name": "WordPress 一键建站", "desc": "创建数据库、下载 WordPress、生成 Nginx 站点并初始化管理员。",
@@ -239,12 +265,12 @@ func appServiceStatesByName(names []string) []map[string]any {
 
 func appActions(spec appSpec, installed bool) []string {
 	if installed {
-		actions := []string{"update", "uninstall"}
-		if len(spec.Update) == 0 {
-			actions = actions[1:]
+		actions := []string{}
+		if len(spec.Update) > 0 {
+			actions = append(actions, "update")
 		}
-		if len(spec.Remove) == 0 {
-			actions = actions[:1]
+		if len(spec.Remove) > 0 {
+			actions = append(actions, "uninstall")
 		}
 		return actions
 	}
@@ -345,8 +371,15 @@ func (a *app) handleAppAction(w http.ResponseWriter, r *http.Request) {
 	if !a.requireMaintenance(w, r) {
 		return
 	}
-	var in struct{ ID, Action string }
+	var in struct {
+		ID, Action, URL string
+		Port            int
+	}
 	if !decodeJSON(w, r, &in) {
+		return
+	}
+	if item, ok := marketplaceByID(in.ID); ok {
+		a.handleMarketplaceAction(w, r, item, in.Action, in.Port, in.URL)
 		return
 	}
 	if !oneOf(in.Action, "install", "update", "uninstall") {
@@ -394,6 +427,19 @@ func appInstalled(spec appSpec) bool {
 		return false
 	}
 	for _, check := range spec.Checks {
+		if check == "compose:v2" {
+			if _, err := runCommand(5*time.Second, "docker", "compose", "version"); err != nil {
+				return false
+			}
+			continue
+		}
+		if strings.HasPrefix(check, "package:") {
+			out, err := runCommand(5*time.Second, "dpkg-query", "-W", "-f=${Status}", strings.TrimPrefix(check, "package:"))
+			if err != nil || strings.TrimSpace(out) != "install ok installed" {
+				return false
+			}
+			continue
+		}
 		if !commandExists(check) {
 			return false
 		}
@@ -771,8 +817,7 @@ func buildSiteConfig(domain, kind, root, upstream string, tls bool) (string, err
     return 301 https://$host$request_uri;
 }
 server {
-    listen 443 ssl;
-    http2 on;
+    listen 443 ssl http2;
     server_name %s;
     ssl_certificate %s;
     ssl_certificate_key %s;

@@ -7,6 +7,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -22,6 +23,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/robfig/cron/v3"
 )
 
 type scheduleEntry struct {
@@ -199,13 +202,20 @@ func (a *app) handleFileAdvancedAction(w http.ResponseWriter, r *http.Request, i
 }
 
 func (a *app) handleDatastores(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
 	if r.Method == http.MethodGet {
 		result := map[string]any{
 			"postgres": map[string]any{"installed": commandExists("psql"), "status": serviceStatus("postgresql"), "roles": []string{}},
 			"redis":    map[string]any{"installed": commandExists("redis-cli"), "status": serviceStatus("redis-server"), "databases": []map[string]any{}},
 		}
 		if commandExists("psql") {
-			if out, err := runCommand(15*time.Second, "sudo", "-u", "postgres", "psql", "-Atc", "SELECT rolname FROM pg_roles WHERE rolname !~ '^pg_' ORDER BY 1"); err == nil {
+			if out, err := runCommand(15*time.Second, "runuser", "-u", "postgres", "--", "psql", "-Atc", "SELECT datname FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres' ORDER BY 1"); err == nil {
+				result["postgres"].(map[string]any)["databases"] = strings.Fields(out)
+			}
+			if out, err := runCommand(15*time.Second, "runuser", "-u", "postgres", "--", "psql", "-Atc", "SELECT rolname FROM pg_roles WHERE rolname !~ '^pg_' ORDER BY 1"); err == nil {
 				result["postgres"].(map[string]any)["roles"] = strings.Fields(out)
 			}
 		}
@@ -225,25 +235,48 @@ func (a *app) handleDatastores(w http.ResponseWriter, r *http.Request) {
 	if !a.requireMaintenance(w, r) {
 		return
 	}
-	var in struct{ Engine, Action, Name, Password, Confirm string }
+	var in struct{ Engine, Action, Name, Password, Confirm, Query string }
 	if !decodeJSON(w, r, &in) {
 		return
 	}
 	var out string
 	var err error
 	switch in.Engine + ":" + in.Action {
+	case "postgres:query":
+		if !databaseRE.MatchString(in.Name) || strings.TrimSpace(in.Query) == "" || len(in.Query) > 64*1024 || strings.ContainsRune(in.Query, 0) {
+			writeJSON(w, 400, map[string]string{"error": "数据库或 SQL 无效"})
+			return
+		}
+		out, err = runCommandInput(30*time.Second, in.Query, "runuser", "-u", "postgres", "--", "psql", "-X", "-v", "ON_ERROR_STOP=1", "--csv", "-d", in.Name)
+		a.audit(r, "database.query", in.Name, err == nil, "PostgreSQL query completed")
+		if err != nil {
+			writeJSON(w, 400, map[string]string{"error": outOrErr(out, err)})
+			return
+		}
+		writeJSON(w, 200, parsePostgresCSV(out))
+		return
+	case "postgres:drop-db", "postgres:drop-role":
+		if !databaseRE.MatchString(in.Name) || in.Name == "postgres" || strings.HasPrefix(in.Name, "pg_") || in.Confirm != "DELETE "+in.Name {
+			err = errors.New("数据库/角色或确认文本无效")
+		} else {
+			command := "dropdb"
+			if in.Action == "drop-role" {
+				command = "dropuser"
+			}
+			out, err = runCommand(20*time.Second, "runuser", "-u", "postgres", "--", command, "--", in.Name)
+		}
 	case "postgres:create-role":
 		if !databaseRE.MatchString(in.Name) || len(in.Password) < 12 || strings.ContainsAny(in.Password, "'\\\r\n") {
 			err = errors.New("角色名或密码无效")
 		} else {
-			sql := fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD '%s';", in.Name, in.Password)
-			out, err = runCommand(20*time.Second, "sudo", "-u", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-c", sql)
+			sql := fmt.Sprintf("CREATE ROLE \"%s\" LOGIN PASSWORD '%s';", in.Name, in.Password)
+			out, err = runCommandInput(20*time.Second, sql, "runuser", "-u", "postgres", "--", "psql", "-v", "ON_ERROR_STOP=1")
 		}
 	case "postgres:create-db":
 		if !databaseRE.MatchString(in.Name) {
 			err = errors.New("数据库名无效")
 		} else {
-			out, err = runCommand(20*time.Second, "sudo", "-u", "postgres", "createdb", in.Name)
+			out, err = runCommand(20*time.Second, "runuser", "-u", "postgres", "--", "createdb", in.Name)
 		}
 	case "redis:flush-db":
 		if in.Confirm != "FLUSH "+in.Name || !regexp.MustCompile(`^db([0-9]|1[0-5])$`).MatchString(in.Name) {
@@ -255,6 +288,7 @@ func (a *app) handleDatastores(w http.ResponseWriter, r *http.Request) {
 	default:
 		err = errors.New("不支持的数据存储操作")
 	}
+	out = redactSecrets(out, []string{in.Password})
 	a.audit(r, "datastore."+in.Action, in.Engine+"/"+in.Name, err == nil, outOrErr(out, err))
 	if err != nil {
 		writeJSON(w, 400, map[string]string{"error": outOrErr(out, err)})
@@ -263,7 +297,38 @@ func (a *app) handleDatastores(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
+func parsePostgresCSV(output string) map[string]any {
+	reader := csv.NewReader(strings.NewReader(output))
+	reader.FieldsPerRecord = -1
+	records, err := reader.ReadAll()
+	result := map[string]any{"columns": []string{}, "rows": []map[string]string{}, "output": output}
+	if err != nil || len(records) < 2 {
+		return result
+	}
+	columns := records[0]
+	rows := []map[string]string{}
+	for _, record := range records[1:] {
+		if len(record) != len(columns) {
+			continue
+		}
+		row := map[string]string{}
+		for index, value := range record {
+			row[columns[index]] = value
+		}
+		rows = append(rows, row)
+		if len(rows) >= 500 {
+			break
+		}
+	}
+	result["columns"], result["rows"] = columns, rows
+	return result
+}
+
 func (a *app) handleCertificates(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
 	if r.Method == http.MethodGet {
 		writeJSON(w, 200, map[string]any{"certbot": commandExists("certbot"), "certificates": scanCertificates()})
 		return
@@ -319,16 +384,28 @@ func (a *app) handleWordPress(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "域名或邮箱无效"})
 		return
 	}
-	db := "wp_" + strings.ReplaceAll(strings.Split(in.Domain, ".")[0], "-", "_")
+	for _, command := range []string{"php", "curl", databaseCLI(), nginxBin()} {
+		if !commandExists(command) {
+			writeJSON(w, 409, map[string]string{"error": "请先安装 LNMP 环境，缺少 " + command})
+			return
+		}
+	}
+	digest := sha256.Sum256([]byte(strings.ToLower(in.Domain)))
+	db := "wp_" + fmt.Sprintf("%x", digest[:10])
 	user := truncate(db+"_u", 30)
 	password := base64.RawURLEncoding.EncodeToString(randomBytes(18))
 	adminPassword := base64.RawURLEncoding.EncodeToString(randomBytes(18))
 	root := filepath.Join(fileRoot(), in.Domain, "public")
+	vhostPath := filepath.Join(env("TAF_NGINX_VHOST_DIR", "/usr/local/nginx/conf/vhost"), in.Domain+".conf")
+	if fileExists(root) || fileExists(vhostPath) {
+		writeJSON(w, 409, map[string]string{"error": "网站目录或配置已存在，不允许覆盖安装"})
+		return
+	}
 	if _, err := safePath(fileRoot(), root); err != nil {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
-	sql := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER IF NOT EXISTS '%s'@'localhost' IDENTIFIED BY '%s'; GRANT ALL ON `%s`.* TO '%s'@'localhost'; FLUSH PRIVILEGES;", db, user, password, db, user)
+	sql := fmt.Sprintf("CREATE DATABASE `%s` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER '%s'@'localhost' IDENTIFIED BY '%s'; GRANT ALL ON `%s`.* TO '%s'@'localhost'; FLUSH PRIVILEGES;", db, user, password, db, user)
 	vhost := fmt.Sprintf(`# managed-by: tryallfun-panel
 server {
     listen 80;
@@ -347,21 +424,42 @@ server {
 	commands := []string{
 		fmt.Sprintf("mkdir -p %s", shellQuote(filepath.Dir(root))),
 		fmt.Sprintf("curl -fsSL https://wordpress.org/latest.tar.gz | tar -xz -C %s", shellQuote(filepath.Dir(root))),
-		fmt.Sprintf("rm -rf %s && mv %s %s", shellQuote(root), shellQuote(filepath.Join(filepath.Dir(root), "wordpress")), shellQuote(root)),
+		fmt.Sprintf("test ! -e %s && mv -T %s %s", shellQuote(root), shellQuote(filepath.Join(filepath.Dir(root), "wordpress")), shellQuote(root)),
 		fmt.Sprintf("printf %%s %s | %s", shellQuote(sql), shellQuote(databaseCLI())),
 		"curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /tmp/kun-wp-cli.phar",
 		fmt.Sprintf("php /tmp/kun-wp-cli.phar config create --path=%s --dbname=%s --dbuser=%s --dbpass=%s --dbhost=localhost --skip-check --allow-root", shellQuote(root), shellQuote(db), shellQuote(user), shellQuote(password)),
 		fmt.Sprintf("php /tmp/kun-wp-cli.phar core install --path=%s --url=%s --title=%s --admin_user=kunadmin --admin_password=%s --admin_email=%s --skip-email --allow-root", shellQuote(root), shellQuote("http://"+in.Domain), shellQuote(in.Title), shellQuote(adminPassword), shellQuote(in.Email)),
-		fmt.Sprintf("printf %%s %s > %s", shellQuote(vhost), shellQuote(filepath.Join(env("TAF_NGINX_VHOST_DIR", "/usr/local/nginx/conf/vhost"), in.Domain+".conf"))),
-		fmt.Sprintf("%s -t && %s -s reload", shellQuote(nginxBin()), shellQuote(nginxBin())),
-		fmt.Sprintf("chown -R www:www %s", shellQuote(filepath.Dir(root))),
+		fmt.Sprintf("chown -R %s %s", shellQuote(env("TAF_WEB_USER", "www-data")+":"+env("TAF_WEB_GROUP", "www-data")), shellQuote(filepath.Dir(root))),
 	}
-	j := a.startSensitiveJob("部署 WordPress "+in.Domain, commands, []string{password, adminPassword}, r)
+	j := a.startManagedJob("部署 WordPress "+in.Domain, r, func() (string, error) {
+		wpCLI, err := os.CreateTemp("", "kun-wp-cli-*.phar")
+		if err != nil {
+			return "", err
+		}
+		_ = wpCLI.Close()
+		defer os.Remove(wpCLI.Name())
+		var output strings.Builder
+		for _, command := range commands {
+			command = strings.ReplaceAll(command, "/tmp/kun-wp-cli.phar", shellQuote(wpCLI.Name()))
+			out, err := runShell(20*time.Minute, command)
+			output.WriteString(redactSecrets(out, []string{password, adminPassword}) + "\n")
+			if err != nil {
+				return trimJobOutput(output.String()), err
+			}
+		}
+		return trimJobOutput(output.String()), writeAndReloadNginx(vhostPath, []byte(vhost))
+	})
 	a.audit(r, "wordpress.credentials", in.Domain, true, "数据库凭据仅在本次响应返回")
 	writeJSON(w, 202, map[string]any{"job": j, "database": db, "user": user, "password": password, "adminUser": "kunadmin", "adminPassword": adminPassword, "root": root})
 }
 
 func (a *app) handleSchedules(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	a.scheduleMu.Lock()
+	defer a.scheduleMu.Unlock()
 	path := filepath.Join(a.dataDir, "schedules.json")
 	schedules := make([]scheduleEntry, 0)
 	if b, err := os.ReadFile(path); err == nil {
@@ -378,13 +476,31 @@ func (a *app) handleSchedules(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in) {
 		return
 	}
+	previous := append([]scheduleEntry(nil), schedules...)
+	index := -1
+	for i, item := range schedules {
+		if item.ID == in.ID {
+			index = i
+			break
+		}
+	}
+	if in.Action != "add" && index < 0 {
+		writeJSON(w, 404, map[string]string{"error": "计划任务不存在"})
+		return
+	}
 	switch in.Action {
-	case "add":
-		if !validCron(in.Cron) || strings.TrimSpace(in.Command) == "" || len(in.Command) > 2048 {
+	case "add", "update":
+		if !validCron(in.Cron) || strings.TrimSpace(in.Command) == "" || len(in.Command) > 2048 || strings.ContainsAny(in.Command, "\r\n\x00") {
 			writeJSON(w, 400, map[string]string{"error": "Cron 表达式或命令无效"})
 			return
 		}
-		schedules = append(schedules, scheduleEntry{randomToken(6), cleanNote(in.Name), in.Cron, in.Command, true})
+		if in.Action == "add" {
+			schedules = append(schedules, scheduleEntry{randomToken(6), cleanNote(in.Name), in.Cron, in.Command, true})
+		} else {
+			schedules[index].Name, schedules[index].Cron, schedules[index].Command = cleanNote(in.Name), in.Cron, in.Command
+		}
+	case "toggle":
+		schedules[index].Enabled = !schedules[index].Enabled
 	case "delete":
 		out := schedules[:0]
 		for _, s := range schedules {
@@ -398,11 +514,12 @@ func (a *app) handleSchedules(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data, _ := json.MarshalIndent(schedules, "", "  ")
-	if err := atomicWrite(path, data, 0600); err != nil {
+	if err := writeCronFile(schedules); err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
-	if err := writeCronFile(schedules); err != nil {
+	if err := atomicWrite(path, data, 0600); err != nil {
+		_ = writeCronFile(previous)
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
@@ -415,23 +532,18 @@ func writeCronFile(items []scheduleEntry) error {
 	b.WriteString("SHELL=/bin/bash\nPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n")
 	for _, item := range items {
 		if item.Enabled {
-			fmt.Fprintf(&b, "%s root %s >> /var/log/kunpanel-cron.log 2>&1\n", item.Cron, item.Command)
+			fmt.Fprintf(&b, "%s root echo %s | base64 -d | /bin/bash >> /var/log/kunpanel-cron.log 2>&1\n", item.Cron, base64.StdEncoding.EncodeToString([]byte(item.Command)))
 		}
 	}
-	return atomicWrite("/etc/cron.d/kunpanel", []byte(b.String()), 0644)
+	return atomicWrite(env("TAF_CRON_FILE", "/etc/cron.d/kunpanel"), []byte(b.String()), 0644)
 }
 
 func validCron(s string) bool {
-	fields := strings.Fields(s)
-	if len(fields) != 5 {
+	if len(strings.Fields(s)) != 5 || strings.ContainsAny(s, "\r\n") {
 		return false
 	}
-	for _, f := range fields {
-		if strings.ContainsAny(f, "\r\n;") || !regexp.MustCompile(`^[0-9*/,\-]+$`).MatchString(f) {
-			return false
-		}
-	}
-	return true
+	_, err := cron.ParseStandard(s)
+	return err == nil
 }
 
 func (a *app) handleBackups(w http.ResponseWriter, r *http.Request) {
@@ -633,6 +745,10 @@ func (a *app) handleNotifications(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) handleUpgrade(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	a.mu.RLock()
 	url, key := a.cfg.UpgradeURL, a.cfg.UpgradeKey
 	a.mu.RUnlock()
@@ -653,7 +769,7 @@ func (a *app) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 400, map[string]string{"error": "升级清单地址无效: " + err.Error()})
 			return
 		}
-		if _, err := base64.StdEncoding.DecodeString(in.PublicKey); err != nil {
+		if decoded, err := base64.StdEncoding.DecodeString(in.PublicKey); err != nil || len(decoded) != ed25519.PublicKeySize {
 			writeJSON(w, 400, map[string]string{"error": "Ed25519 公钥格式无效"})
 			return
 		}
